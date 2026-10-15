@@ -155,20 +155,32 @@ public partial class IslandWindow : Window
                 _cardLyricSig = "";
                 box.Children.Clear();
             }
-            box.Visibility = Visibility.Collapsed;
-            if (_cardLyricScroll != null) _cardLyricScroll.Visibility = Visibility.Collapsed;
-            if (_cardLyricSep != null) _cardLyricSep.Visibility = Visibility.Collapsed;
+            // 无歌词 → 高度归零（不是 Collapsed），保证测量与显示一致
+            if (_cardLyricScroll != null) _cardLyricScroll.Height = 0;
+            if (_cardLyricSep != null)
+            {
+                _cardLyricSep.Height = 0;
+                _cardLyricSep.Margin = new Thickness(0);
+            }
+            _cardNeedsRemeasure = true;
             return;
         }
-        box.Visibility = Visibility.Visible;
-        if (_cardLyricScroll != null) _cardLyricScroll.Visibility = Visibility.Visible;
-        if (_cardLyricSep != null) _cardLyricSep.Visibility = Visibility.Visible;
+        // 有歌词 → 撑开歌词区（限高 96px，超出滚动）
+        if (_cardLyricScroll != null) _cardLyricScroll.Height = s_cardLyricMaxHeight;
+        if (_cardLyricSep != null)
+        {
+            _cardLyricSep.Height = 1;
+            _cardLyricSep.Margin = new Thickness(0, 12, 0, 8);
+        }
 
         int posMs = (int)(snap!.PositionTicks / TimeSpan.TicksPerMillisecond);
         bool showSub = _settings.Media.ShowLyricTranslation;
         var ctx = _lyrics.GetContextFull(posMs, 1, 1, _lyricOffsetMs, showSub);   // 当前行 + 上下各 1 行（图二样式）
         var sig = string.Join("|", ctx.Select(c => c.Index + ":" + c.Text));
-        if (sig == _cardLyricSig) return;      // 行未变，不重建
+        // 【坑】ctx 为空时 sig 也是空串，而 _cardLyricSig 初值同为空串，
+        // 两空相等会直接 return → 歌词永远不被填充（表现为"展开卡没歌词"）。
+        // 因此空上下文必须继续往下走（会走到末尾把 box 清空），不能在此提前返回。
+        if (sig.Length > 0 && sig == _cardLyricSig) return;   // 行未变才跳过
         _cardLyricSig = sig;
 
         var t = AppTheme.Current;
@@ -209,6 +221,11 @@ public partial class IslandWindow : Window
             }
             catch { /* 布局未就绪时忽略 */ }
         }
+
+        // 【关键】歌词是异步晚到的：卡片构建时歌词区可能还是空的（高度≈0），
+        // 此时实测的卡片高度不含歌词 → 歌词出现后会被裁掉。
+        // 因此每次重建歌词行（内容高度变化）都标记"需要重新实测卡片高度"。
+        _cardNeedsRemeasure = true;
     }
 
 
@@ -585,6 +602,8 @@ public partial class IslandWindow : Window
     private StackPanel? _cardLyricBox;
     private ScrollViewer? _cardLyricScroll;
     private Border? _cardLyricSep;
+    /// <summary>歌词内容变化后需重新实测卡片高度（歌词异步晚到）</summary>
+    private bool _cardNeedsRemeasure;
     private string _cardLyricSig = "";
 
     private Core.Settings _settings = Core.Settings.Load();
@@ -1325,11 +1344,13 @@ public partial class IslandWindow : Window
         // 若此处用 if 判断，晚到的歌词就永远不会显示 —— 这正是"展开卡没歌词"的原因。
         // 可见性交给每帧的 RefreshCardLyric 决定。
         // 高度自适应但有上限（MaxHeight + 滚动条），不会被歌词无限撑高。
+        // 【关键】分隔线初始 Visible：MeasureCardContent 在构建时实测卡片高度，
+        // 若此处 Collapsed（高度 0），实测值就不含歌词区，卡片高度偏小 → 歌词被裁掉。
         var lySep = new Border
         {
-            Height = 1, Background = t.Stroke, Opacity = 0.5,
-            Margin = new Thickness(0, 12, 0, 8),
-            Visibility = Visibility.Collapsed
+            Height = 0, Background = t.Stroke, Opacity = 0.5,
+            Margin = new Thickness(0, 0, 0, 0),    // 歌词到位后设为 1 / (0,12,0,8)
+            Visibility = Visibility.Visible
         };
         _cardLyricSep = lySep;
         root.Children.Add(lySep);
@@ -1337,14 +1358,21 @@ public partial class IslandWindow : Window
         var lyInner = new StackPanel();
         _cardLyricBox = lyInner;
 
+        // 【关键】用固定 Height 而不是 MaxHeight：
+        // ScrollViewer 的期望高度需要完整布局过程才能算出，
+        // 在 MeasureCardContent 的离屏 Measure 里算不出来（实测始终为 0），
+        // 导致卡片高度不含歌词区、歌词被裁。固定高度可被可靠测量。
+        // 【关键】Height 初值 0（无歌词），歌词到位后由 RefreshCardLyric 设为 96。
+        // 不能用 Visibility.Collapsed 控制：Collapsed 元素高度恒为 0，
+        // MeasureCardContent 在离屏测量时就测不到歌词高度，卡片定高偏小 → 歌词被裁。
         var lyScroll = new ScrollViewer
         {
             Content = lyInner,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-            MaxHeight = s_cardLyricMaxHeight,      // 限高：约 4 行
-            Padding = new Thickness(0, 0, 6, 0),   // 给滚动条留位
-            Visibility = Visibility.Collapsed
+            Height = 0,                            // 歌词到位后设为 s_cardLyricMaxHeight
+            Padding = new Thickness(0, 0, 6, 0),
+            Visibility = Visibility.Visible
         };
         _cardLyricScroll = lyScroll;
         root.Children.Add(lyScroll);
@@ -2514,6 +2542,22 @@ public partial class IslandWindow : Window
                 //   b.Height = item.Height.Value * Scale
                 // 内容区实际可用高度 = 内容高 × Scale，所以这里必须乘回去，
                 // 否则整体缩放 >1（如 1.35×）会把底部按钮裁掉。
+                // 歌词晚到 / 内容高度变化 → 需要重新实测（此时卡片内容不必重建）
+                if (wantCard && _cardNeedsRemeasure)
+                {
+                    _cardNeedsRemeasure = false;
+                    var existing = (b.Child as ContentPresenter)?.Content as FrameworkElement;
+                    if (existing != null)
+                    {
+                        double sc2 = IslandMetrics.Scale <= 0 ? 1.0 : IslandMetrics.Scale;
+                        double m2 = MeasureCardContent(existing, cwForCard() / sc2);
+                        if (m2 > 0 && Math.Abs(m2 - item.MeasuredCardHeight) > 0.5)
+                        {
+                            item.MeasuredCardHeight = m2;
+                            _lastLayoutSignature = null;
+                        }
+                    }
+                }
                 if (wantCard && c != null)
                 {
                     // 宽度也要按缩放还原：内容是在"放大后的框"里排版的
