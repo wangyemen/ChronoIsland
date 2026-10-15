@@ -40,8 +40,8 @@ public partial class IslandWindow : Window
     private Sources.MediaSource? _media;
     private Sources.SysStateSource? _sys;   // 键位 + 会话解锁（docs §5.5）
     private static readonly double s_progressTrackWidth = 388;
-    /// <summary>展开卡歌词区最大高度（3 行：当前行 + 上下各 1 行），超出用滚动条</summary>
-    private static readonly double s_cardLyricMaxHeight = 96;
+    /// <summary>展开卡歌词区高度（当前行 + 上下各 2 行 = 5 行），超出用滚动条</summary>
+    private static readonly double s_cardLyricMaxHeight = 150;
     private MediaCardParts? _cardParts;
     /// <summary>最近一次卡片内按钮操作的时间（用于屏蔽冒泡）</summary>
     private DateTime _lastCardAction = DateTime.MinValue;
@@ -175,7 +175,7 @@ public partial class IslandWindow : Window
 
         int posMs = (int)(snap!.PositionTicks / TimeSpan.TicksPerMillisecond);
         bool showSub = _settings.Media.ShowLyricTranslation;
-        var ctx = _lyrics.GetContextFull(posMs, 1, 1, _lyricOffsetMs, showSub);   // 当前行 + 上下各 1 行（图二样式）
+        var ctx = _lyrics.GetContextFull(posMs, 2, 2, _lyricOffsetMs, showSub);   // 当前行 + 上下各 2 行 = 5 行
         var sig = string.Join("|", ctx.Select(c => c.Index + ":" + c.Text));
         // 【坑】ctx 为空时 sig 也是空串，而 _cardLyricSig 初值同为空串，
         // 两空相等会直接 return → 歌词永远不被填充（表现为"展开卡没歌词"）。
@@ -602,6 +602,8 @@ public partial class IslandWindow : Window
     private StackPanel? _cardLyricBox;
     private ScrollViewer? _cardLyricScroll;
     private Border? _cardLyricSep;
+    /// <summary>卡片内容滚动宿主（超出高度上限时滚动而非裁切）</summary>
+    private ScrollViewer? _cardScrollHost;
     /// <summary>歌词内容变化后需重新实测卡片高度（歌词异步晚到）</summary>
     private bool _cardNeedsRemeasure;
     private string _cardLyricSig = "";
@@ -959,11 +961,18 @@ public partial class IslandWindow : Window
     {
         try
         {
+            // 卡片外层是 WrapWithClose 的 Grid，里面套了 ScrollViewer(MaxHeight=上限)。
+            // 直接量 Grid 会被 MaxHeight 截住，测不出"内容真实需要多高"，
+            // 自适应就失效。所以优先绕过 ScrollViewer 去量它的内容。
+            FrameworkElement target = content;
+            var sv = FindChild<ScrollViewer>(content);
+            if (sv?.Content is FrameworkElement inner) target = inner;
+
             var host = new Border
             {
                 Width = Math.Max(1, width),
                 Height = double.PositiveInfinity,
-                Child = content
+                Child = target
             };
             host.Measure(new Size(Math.Max(1, width), double.PositiveInfinity));
             var h = host.DesiredSize.Height;
@@ -980,10 +989,39 @@ public partial class IslandWindow : Window
 
     private FrameworkElement WrapWithClose(FrameworkElement body)
     {
+        // 【自适应高度 + 上限 + 滚动条】
+        // 卡片高度由内容实测决定（自适应），但上限受 CardMaxHeight 约束；
+        // 超出上限时用 ScrollViewer 滚动，而不是让 Border 把内容裁掉
+        // —— 之前通知卡底部按钮被裁、歌词看不见，就是硬裁切造成的。
+        // 滚动条：默认 Hidden（不占宽度、不显示），只在鼠标进入卡片时才细显示。
+        // 之前用 Auto，Windows 默认滚动条又粗又显眼，横在卡片里很难看。
+        var sv = new ScrollViewer
+        {
+            Content = body,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Hidden,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            MaxHeight = IslandMetrics.CardMaxHeight,
+            Padding = new Thickness(0)
+        };
+        // 悬停时允许滚轮滚动（Hidden 不影响滚轮），并临时显示细滚动条
+        sv.MouseEnter += (_, _) => { sv.VerticalScrollBarVisibility = ScrollBarVisibility.Auto; ApplyThinScrollBar(sv); };
+        sv.MouseLeave += (_, _) => sv.VerticalScrollBarVisibility = ScrollBarVisibility.Hidden;
+        _cardScrollHost = sv;
+
         var host = new Grid();
-        host.Children.Add(body);
+        host.Children.Add(sv);
         host.Children.Add(BuildCloseButton(AppTheme.Current));
         return host;
+    }
+
+    /// <summary>
+    /// 按内容实测自适应高度：
+    /// 内容 <= 上限 → 卡片随内容生长；内容 > 上限 → 卡在上限，内部滚动。
+    /// </summary>
+    private double AdaptiveCardHeight(FrameworkElement content, double width)
+    {
+        double h = MeasureCardContent(content, width);   // 已夹在 [Min, Max] 内
+        return h;
     }
 
     /// <summary>
@@ -996,6 +1034,7 @@ public partial class IslandWindow : Window
         _cardLyricBox = null;              // 歌词区引用同理作废（卡片会被重建）
         _cardLyricScroll = null;
         _cardLyricSep = null;
+        _cardScrollHost = null;
         _cardLyricSig = "";
         var body = ev.Kind switch
         {
@@ -2290,6 +2329,42 @@ public partial class IslandWindow : Window
         if (!string.IsNullOrEmpty(ev.Subtitle)) w += ev.Subtitle.Length * 6.0 + 8;
         w += IslandMetrics.PaddingX * 2;
         return Math.Clamp(w, IslandMetrics.MinWidth, IslandMetrics.MaxWidth);
+    }
+
+    /// <summary>
+    /// 把卡片里的滚动条改造成"细、圆角、低对比"样式，融入玻璃卡。
+    /// Windows 默认滚动条约 17px 宽且带箭头按钮，放在卡片里非常突兀。
+    /// </summary>
+    private static void ApplyThinScrollBar(DependencyObject root)
+    {
+        try
+        {
+            foreach (var sb in FindAll<System.Windows.Controls.Primitives.ScrollBar>(root))
+            {
+                if (sb.Tag as string == "thin") continue;
+                sb.Tag = "thin";
+                sb.Width = 4;
+                sb.Opacity = 0.5;
+                foreach (var rb in FindAll<System.Windows.Controls.Primitives.RepeatButton>(sb))
+                    rb.Visibility = Visibility.Collapsed;
+                foreach (var tr in FindAll<System.Windows.Controls.Primitives.Track>(sb))
+                    tr.Margin = new Thickness(0);
+            }
+        }
+        catch { /* 样式失败不影响功能 */ }
+    }
+
+    /// <summary>查找所有指定类型的后代</summary>
+    private static IEnumerable<T> FindAll<T>(DependencyObject? parent) where T : DependencyObject
+    {
+        if (parent == null) yield break;
+        int n = VisualTreeHelper.GetChildrenCount(parent);
+        for (int i = 0; i < n; i++)
+        {
+            var c = VisualTreeHelper.GetChild(parent, i);
+            if (c is T t) yield return t;
+            foreach (var r in FindAll<T>(c)) yield return r;
+        }
     }
 
     /// <summary>在子元素中查找指定类型的第一个后代</summary>

@@ -12,11 +12,12 @@ public static class IslandMetrics
     public const double CardWidth = 420;
     public const double CardMinHeight = 96;
     /// <summary>
-    /// 详情卡高度上限。媒体卡在控制按钮下方还有歌词区（限高 92px），
-    /// 260 装不下会导致播放按钮被裁切，故放宽到 340；
-    /// 歌词区自身用 MaxHeight + 滚动条限高，卡片不会无限增长。
+    /// 详情卡高度上限（未缩放逻辑值）。
+    /// 媒体卡 = 封面行 + 进度条 + 时间 + 控制按钮 + 歌词区，内容较高；
+    /// 通知卡正文长时也会超过 400。取 460 兼顾两者，
+    /// 超出部分由卡片内滚动条承载，不会无限增长。
     /// </summary>
-    public const double CardMaxHeight = 340;
+    public const double CardMaxHeight = 460;
     public const double CardRadius = 28;
     public const double Gap = 8;
     public const double SphereSize = 36;
