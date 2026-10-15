@@ -9,11 +9,8 @@ public static class IslandMetrics
     // ---- 固定值 ----
     public const double IslandHeight = 36;
     public const double MinWidth = 36;              // = 正圆，收起终点几何
-    /// <summary>
-    /// 详情卡宽度。比胶囊上限(420)宽：媒体卡要在标题右侧显示 2~3 行歌词，
-    /// 420 太窄会导致歌词频繁滚动。
-    /// </summary>
-    public const double CardWidth = 560;
+    /// <summary>详情卡宽度（与胶囊上限一致，不额外加宽）</summary>
+    public const double CardWidth = 420;
     public const double CardMinHeight = 96;
     /// <summary>
     /// 详情卡高度下限（未缩放逻辑值）。

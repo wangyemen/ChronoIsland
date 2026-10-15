@@ -93,10 +93,7 @@ public sealed class ClusterStack
 
         bool card = _expanded && active.Role == IslandRole.Card;
         double cw = card ? IslandMetrics.CardWidth : (active.MeasuredWidth > 0 ? active.MeasuredWidth : IslandMetrics.MaxWidth);
-        // 卡片宽度用 CardWidth，不受胶囊上限 MaxWidth 限制（歌词需要更宽）
-        cw = card
-            ? Math.Clamp(cw, IslandMetrics.MinWidth, IslandMetrics.CardWidth)
-            : Math.Clamp(cw, IslandMetrics.MinWidth, IslandMetrics.MaxWidth);
+        cw = Math.Clamp(cw, IslandMetrics.MinWidth, IslandMetrics.MaxWidth);
         // 展开卡高度按"内容实测"取值（MeasuredCardHeight），并夹在 [96, 260] 之间。
         // 【不要写死 176】各卡内容差异很大（媒体卡 ~150 / 通知卡可 3 行正文），
         // 写死会导致内容少的卡底部留一大块空白、内容多的卡被裁切。

@@ -1268,7 +1268,14 @@ public partial class IslandWindow : Window
         Grid.SetColumn(coverHost, 0);
         top.Children.Add(coverHost);
 
-        var meta = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+        // 标题列限宽：卡片宽 420 时，若标题列 Auto 无限伸展，长标题会把
+        // 歌词列挤到几乎没有宽度。限制在 140px（内部 TextTrimming 截断），
+        // 把省下的宽度全部让给歌词显示区。
+        var meta = new StackPanel
+        {
+            VerticalAlignment = VerticalAlignment.Center,
+            MaxWidth = 140
+        };
         meta.Children.Add(new TextBlock
         {
             Text = snap.Title, FontSize = 14, FontWeight = FontWeights.SemiBold,
@@ -1287,9 +1294,10 @@ public partial class IslandWindow : Window
         // 超出宽度时：先按行截断（TextTrimming），必要时整行水平滚动。
         var lyWrap = new Grid
         {
-            Margin = new Thickness(24, 0, 4, 0),        // 与标题拉开距离（之前太靠左）
-            VerticalAlignment = VerticalAlignment.Center,
-            MinWidth = 210                              // 更宽的歌词区
+            // 左边距与外层 16 内边距相配；不再设 MinWidth，
+            // 让它自动占满标题列右侧的【全部剩余宽度】（这才是"歌词区加宽"）。
+            Margin = new Thickness(14, 0, 0, 0),
+            VerticalAlignment = VerticalAlignment.Center
         };
         lyWrap.ClipToBounds = true;
         var lyStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
