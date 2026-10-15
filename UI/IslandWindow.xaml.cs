@@ -40,6 +40,23 @@ public partial class IslandWindow : Window
     private Sources.MediaSource? _media;
     private Sources.SysStateSource? _sys;   // 键位 + 会话解锁（docs §5.5）
     private static readonly double s_progressTrackWidth = 388;
+    /// <summary>
+    /// 展开卡的目标高度（未缩放逻辑值）。
+    /// 媒体卡：基础内容高固定 174，再按"是否启用歌词"预留歌词区高度。
+    /// 这样即使歌词异步晚到（2~15s），卡片也已预留空间，不会被裁。
+    /// </summary>
+    private double DesiredCardHeight(IslandEvent ev, Sources.MediaSnapshot? snap)
+    {
+        double baseH = 174;                       // 媒体卡基础高度（实测值）
+        if (ev.Kind == "media" && _settings.Media.ShowLyrics
+            && snap != null && Sources.MediaSourcePolicy.IsMusicPlayer(snap.SourceId))
+        {
+            baseH += 12 + 1 + 8;                  // 分隔线（上下间距 12/8 + 1px 线）
+            baseH += s_cardLyricMaxHeight;        // 歌词区
+        }
+        return baseH;
+    }
+
     /// <summary>展开卡歌词区高度（当前行 + 上下各 3 行 = 7 行），超出用滚动条</summary>
     private static readonly double s_cardLyricMaxHeight = 220;
     private MediaCardParts? _cardParts;
@@ -960,26 +977,26 @@ public partial class IslandWindow : Window
     /// 离屏容器宽高都设为 double.PositiveInfinity，让 WPF 按内容自然撑开。
     /// 夹在 [CardMinHeight, CardMaxHeight]，避免极端内容把卡撑爆或塌成一坨。
     /// </summary>
-    private static double MeasureCardContent(FrameworkElement content, double width)
+        private static double MeasureCardContent(FrameworkElement content, double width)
     {
         try
         {
-            // 卡片外层是 WrapWithClose 的 Grid，里面套了 ScrollViewer(MaxHeight=上限)。
-            // 直接量 Grid 会被 MaxHeight 截住，测不出"内容真实需要多高"，
-            // 自适应就失效。所以优先绕过 ScrollViewer 去量它的内容。
-            FrameworkElement target = content;
-            var sv = FindChild<ScrollViewer>(content);
-            if (sv?.Content is FrameworkElement inner) target = inner;
+            // 量【整棵内容树】（含外层 Grid/Border），不要绕过 ScrollViewer：
+            // 歌词区靠 ScrollViewer.Height 撑开（0 或 220），绕过它就测不到那 220，
+            // 卡片高度会永远停在"无歌词"的 174 → 歌词区被裁、进度条按钮错位。
+            // 【必须 InvalidateMeasure】：WPF 对已测量过的元素不会重新测量，
+            // 改了子元素 Height 后不失效就仍返回旧值。
+            InvalidateTree(content);
 
             var host = new Border
             {
                 Width = Math.Max(1, width),
                 Height = double.PositiveInfinity,
-                Child = target
+                Child = content
             };
             host.Measure(new Size(Math.Max(1, width), double.PositiveInfinity));
             var h = host.DesiredSize.Height;
-            // 上下限同样按缩放放大：CardMin/Max 是"未缩放的逻辑值"
+
             double scale = IslandMetrics.Scale <= 0 ? 1.0 : IslandMetrics.Scale;
             return double.IsNaN(h) || double.IsInfinity(h) || h <= 0
                 ? 0
@@ -989,6 +1006,7 @@ public partial class IslandWindow : Window
         }
         catch (Exception) { return 0; }
     }
+
 
     private FrameworkElement WrapWithClose(FrameworkElement body)
     {
@@ -1422,7 +1440,6 @@ public partial class IslandWindow : Window
         // 表现为"滚轮只能下滚、上滚没反应"）
         lyScroll.PreviewMouseWheel += (_, _) => _lyricUserScrollAt = DateTime.Now;
         _cardLyricScroll = lyScroll;
-        root.Children.Add(lyScroll);
         root.Children.Add(lyScroll);
         _cardParts!.PlayGlyphHost = playBtn.Child as Border;
         _cardParts.PlayGlyphName = snap.IsPlaying ? "pause" : "play";
@@ -2279,10 +2296,14 @@ public partial class IslandWindow : Window
             }
             wave.Children.Add(bar);
         }
-        // 波形放进 metaRow（第 3 列，右端），不再单独占岛的第 3 列
-        Grid.SetColumn(wave, 3);
-        var metaRowRef = FindChild<Grid>(textCol);
-        if (metaRowRef != null) metaRowRef.Children.Add(wave);
+        // 【布局】波形放在「标题行」与「歌词行」之间，作为独立一行居中：
+        //   标题 作者
+        //   ▁▃▁▃   ← 波形（这里）
+        //   歌词歌词歌词
+        // 之前塞在 metaRow 第 3 列、与歌词挤在同一水平带，观感很乱。
+        wave.HorizontalAlignment = HorizontalAlignment.Left;
+        wave.Margin = new Thickness(0, 2, 0, 2);
+        textCol.Children.Insert(1, wave);   // 0=标题行, 1=波形, 2=歌词行
         return grid;
     }
 
@@ -2413,6 +2434,15 @@ public partial class IslandWindow : Window
     }
 
 
+
+    /// <summary>递归使整棵子树的测量失效（WPF 不会自动重测已测量过的元素）</summary>
+    private static void InvalidateTree(DependencyObject? root)
+    {
+        if (root == null) return;
+        if (root is UIElement ue) ue.InvalidateMeasure();
+        int n = VisualTreeHelper.GetChildrenCount(root);
+        for (int i = 0; i < n; i++) InvalidateTree(VisualTreeHelper.GetChild(root, i));
+    }
 
     /// <summary>查找所有指定类型的后代</summary>
     private static IEnumerable<T> FindAll<T>(DependencyObject? parent) where T : DependencyObject
@@ -2686,9 +2716,11 @@ public partial class IslandWindow : Window
                     {
                         double sc2 = IslandMetrics.Scale <= 0 ? 1.0 : IslandMetrics.Scale;
                         double m2 = MeasureCardContent(existing, cwForCard() / sc2);
-                        if (m2 > 0 && Math.Abs(m2 - item.MeasuredCardHeight) > 0.5)
+                        double need2 = DesiredCardHeight(item.Event, item.Event.Payload as Sources.MediaSnapshot) * sc2;
+                        double tgt2 = Math.Max(m2, need2);
+                        if (tgt2 > 0 && Math.Abs(tgt2 - item.MeasuredCardHeight) > 0.5)
                         {
-                            item.MeasuredCardHeight = m2;
+                            item.MeasuredCardHeight = tgt2;
                             _lastLayoutSignature = null;
                         }
                     }
@@ -2698,9 +2730,12 @@ public partial class IslandWindow : Window
                     // 宽度也要按缩放还原：内容是在"放大后的框"里排版的
                     double sc = IslandMetrics.Scale <= 0 ? 1.0 : IslandMetrics.Scale;
                     double measured = MeasureCardContent(c, cwForCard() / sc);
-                    if (measured > 0 && Math.Abs(measured - item.MeasuredCardHeight) > 0.5)
+                    // 与"预留歌词区"的目标取较大者：歌词晚到时卡片也已留好空间
+                    double need = DesiredCardHeight(item.Event, item.Event.Payload as Sources.MediaSnapshot) * sc;
+                    double tgt = Math.Max(measured, need);
+                    if (tgt > 0 && Math.Abs(tgt - item.MeasuredCardHeight) > 0.5)
                     {
-                        item.MeasuredCardHeight = measured;
+                        item.MeasuredCardHeight = tgt;
                         _lastLayoutSignature = null;   // 强制下一帧重算槽位
                     }
                 }
