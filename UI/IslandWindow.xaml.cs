@@ -40,8 +40,8 @@ public partial class IslandWindow : Window
     private Sources.MediaSource? _media;
     private Sources.SysStateSource? _sys;   // 键位 + 会话解锁（docs §5.5）
     private static readonly double s_progressTrackWidth = 388;
-    /// <summary>展开卡歌词区最大高度（约 4 行），超出用滚动条</summary>
-    private static readonly double s_cardLyricMaxHeight = 92;
+    /// <summary>展开卡歌词区最大高度（3 行：当前行 + 上下各 1 行），超出用滚动条</summary>
+    private static readonly double s_cardLyricMaxHeight = 96;
     private MediaCardParts? _cardParts;
     /// <summary>最近一次卡片内按钮操作的时间（用于屏蔽冒泡）</summary>
     private DateTime _lastCardAction = DateTime.MinValue;
@@ -153,17 +153,20 @@ public partial class IslandWindow : Window
             if (_cardLyricSig != "")
             {
                 _cardLyricSig = "";
-                box.Visibility = Visibility.Collapsed;
-                if (_cardLyricScroll != null) _cardLyricScroll.Visibility = Visibility.Collapsed;
+                box.Children.Clear();
             }
+            box.Visibility = Visibility.Collapsed;
+            if (_cardLyricScroll != null) _cardLyricScroll.Visibility = Visibility.Collapsed;
+            if (_cardLyricSep != null) _cardLyricSep.Visibility = Visibility.Collapsed;
             return;
         }
         box.Visibility = Visibility.Visible;
         if (_cardLyricScroll != null) _cardLyricScroll.Visibility = Visibility.Visible;
+        if (_cardLyricSep != null) _cardLyricSep.Visibility = Visibility.Visible;
 
         int posMs = (int)(snap!.PositionTicks / TimeSpan.TicksPerMillisecond);
         bool showSub = _settings.Media.ShowLyricTranslation;
-        var ctx = _lyrics.GetContextFull(posMs, 3, 5, _lyricOffsetMs, showSub);
+        var ctx = _lyrics.GetContextFull(posMs, 1, 1, _lyricOffsetMs, showSub);   // 当前行 + 上下各 1 行（图二样式）
         var sig = string.Join("|", ctx.Select(c => c.Index + ":" + c.Text));
         if (sig == _cardLyricSig) return;      // 行未变，不重建
         _cardLyricSig = sig;
@@ -171,6 +174,8 @@ public partial class IslandWindow : Window
         var t = AppTheme.Current;
         box.Children.Clear();
         double curTop = 0, curH = 0, offset = 0;
+        // 样式对齐原型（docs/design-lyrics-0.0.1.md §6）：
+        // 居中排列，当前行加粗高亮、上下文行淡化，共 3~5 行
         foreach (var item in ctx)
         {
             var tb = new TextBlock
@@ -179,13 +184,14 @@ public partial class IslandWindow : Window
                 FontSize = item.IsCurrent ? 13.5 : 12,
                 FontWeight = item.IsCurrent ? FontWeights.SemiBold : FontWeights.Normal,
                 Foreground = item.IsCurrent ? t.TextPrimary : t.TextTertiary,
+                TextAlignment = TextAlignment.Center,
                 TextTrimming = TextTrimming.CharacterEllipsis,
-                Margin = new Thickness(0, item.IsCurrent ? 2 : 1, 0, item.IsCurrent ? 2 : 1),
-                Opacity = item.IsCurrent ? 1.0 : 0.62
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                Margin = new Thickness(0, item.IsCurrent ? 3 : 2, 0, item.IsCurrent ? 3 : 2),
+                Opacity = item.IsCurrent ? 1.0 : 0.55
             };
             box.Children.Add(tb);
-            // 估算高度用于定位当前行（Measure 需布局后才有值，这里用字号估算）
-            double h = (item.IsCurrent ? 13.5 : 12) * 1.9 + (item.IsCurrent ? 4 : 2);
+            double h = (item.IsCurrent ? 13.5 : 12) * 1.9 + (item.IsCurrent ? 6 : 4);
             if (item.IsCurrent) { curTop = offset; curH = h; }
             offset += h;
         }
@@ -578,6 +584,7 @@ public partial class IslandWindow : Window
     /// <summary>展开卡歌词容器与其滚动宿主</summary>
     private StackPanel? _cardLyricBox;
     private ScrollViewer? _cardLyricScroll;
+    private Border? _cardLyricSep;
     private string _cardLyricSig = "";
 
     private Core.Settings _settings = Core.Settings.Load();
@@ -967,6 +974,10 @@ public partial class IslandWindow : Window
     private FrameworkElement? BuildCard(IslandEvent ev)
     {
         _cardParts = null;                 // 旧引用作废，避免更新已移除的元素
+        _cardLyricBox = null;              // 歌词区引用同理作废（卡片会被重建）
+        _cardLyricScroll = null;
+        _cardLyricSep = null;
+        _cardLyricSig = "";
         var body = ev.Kind switch
         {
             "media" when ev.Payload is Sources.MediaSnapshot snap => BuildMediaCard(snap),
@@ -1310,30 +1321,33 @@ public partial class IslandWindow : Window
         root.Children.Add(ctl);
 
         // ---- 歌词区（放在控制按钮【下面】）----
-        // 自适应高度但有上限；超出用滚动条，避免卡片被歌词无限撑高。
-        if (_settings.Media.ShowLyrics && Sources.MediaSourcePolicy.IsMusicPlayer(snap.SourceId))
+        // 【关键】容器必须"无条件创建"：卡片构建时歌词往往还没查回来（网络 2~15s），
+        // 若此处用 if 判断，晚到的歌词就永远不会显示 —— 这正是"展开卡没歌词"的原因。
+        // 可见性交给每帧的 RefreshCardLyric 决定。
+        // 高度自适应但有上限（MaxHeight + 滚动条），不会被歌词无限撑高。
+        var lySep = new Border
         {
-            var lySep = new Border
-            {
-                Height = 1, Background = t.Stroke, Opacity = 0.5,
-                Margin = new Thickness(0, 12, 0, 8)
-            };
-            root.Children.Add(lySep);
+            Height = 1, Background = t.Stroke, Opacity = 0.5,
+            Margin = new Thickness(0, 12, 0, 8),
+            Visibility = Visibility.Collapsed
+        };
+        _cardLyricSep = lySep;
+        root.Children.Add(lySep);
 
-            var lyInner = new StackPanel();
-            _cardLyricBox = lyInner;
+        var lyInner = new StackPanel();
+        _cardLyricBox = lyInner;
 
-            var lyScroll = new ScrollViewer
-            {
-                Content = lyInner,
-                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-                MaxHeight = s_cardLyricMaxHeight,      // 限高：最多约 4 行
-                Padding = new Thickness(0, 0, 6, 0)    // 给滚动条留位
-            };
-            _cardLyricScroll = lyScroll;
-            root.Children.Add(lyScroll);
-        }
+        var lyScroll = new ScrollViewer
+        {
+            Content = lyInner,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            MaxHeight = s_cardLyricMaxHeight,      // 限高：约 4 行
+            Padding = new Thickness(0, 0, 6, 0),   // 给滚动条留位
+            Visibility = Visibility.Collapsed
+        };
+        _cardLyricScroll = lyScroll;
+        root.Children.Add(lyScroll);
         _cardParts!.PlayGlyphHost = playBtn.Child as Border;
         _cardParts.PlayGlyphName = snap.IsPlaying ? "pause" : "play";
         return root;
