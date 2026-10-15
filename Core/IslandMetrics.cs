@@ -11,7 +11,12 @@ public static class IslandMetrics
     public const double MinWidth = 36;              // = 正圆，收起终点几何
     public const double CardWidth = 420;
     public const double CardMinHeight = 96;
-    public const double CardMaxHeight = 260;
+    /// <summary>
+    /// 详情卡高度上限。媒体卡在控制按钮下方还有歌词区（限高 92px），
+    /// 260 装不下会导致播放按钮被裁切，故放宽到 340；
+    /// 歌词区自身用 MaxHeight + 滚动条限高，卡片不会无限增长。
+    /// </summary>
+    public const double CardMaxHeight = 340;
     public const double CardRadius = 28;
     public const double Gap = 8;
     public const double SphereSize = 36;

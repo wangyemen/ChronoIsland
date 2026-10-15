@@ -33,6 +33,21 @@ public static class MediaSourcePolicy
         return 70;
     }
 
+    /// <summary>
+    /// 是否为"音乐播放器"（歌词只对这类会话生效）。
+    /// 判定依据：命中已知音乐应用清单，或优先级 >= 100（音乐应用阈值）。
+    /// 浏览器、视频播放器、未知来源一律返回 false —— 浏览器里放视频不该弹歌词。
+    /// </summary>
+    public static bool IsMusicPlayer(string? sourceAppUserModelId)
+    {
+        var id = sourceAppUserModelId ?? "";
+        if (string.IsNullOrWhiteSpace(id)) return false;
+        if (IsBrowserSource(id)) return false;
+        foreach (var (marker, prio) in Known)
+            if (id.Contains(marker, StringComparison.OrdinalIgnoreCase) && prio >= 100) return true;
+        return false;
+    }
+
     public static bool IsBrowserSource(string? sourceAppUserModelId)
     {
         var id = (sourceAppUserModelId ?? "").ToLowerInvariant();

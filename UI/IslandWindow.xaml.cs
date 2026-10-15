@@ -40,6 +40,8 @@ public partial class IslandWindow : Window
     private Sources.MediaSource? _media;
     private Sources.SysStateSource? _sys;   // 键位 + 会话解锁（docs §5.5）
     private static readonly double s_progressTrackWidth = 388;
+    /// <summary>展开卡歌词区最大高度（约 4 行），超出用滚动条</summary>
+    private static readonly double s_cardLyricMaxHeight = 92;
     private MediaCardParts? _cardParts;
     /// <summary>最近一次卡片内按钮操作的时间（用于屏蔽冒泡）</summary>
     private DateTime _lastCardAction = DateTime.MinValue;
@@ -134,16 +136,16 @@ public partial class IslandWindow : Window
     /// 刷新展开卡的歌词区：当前行 + 前后上下文，当前行高亮加粗。
     /// 只在行索引变化时重建（用签名比对），不做每帧重绘。
     /// </summary>
-    private void RefreshCardLyric(Sources.MediaSnapshot? snap)
+        private void RefreshCardLyric(Sources.MediaSnapshot? snap)
     {
         var box = _cardLyricBox;
         if (box == null) { _cardLyricSig = ""; return; }
 
         string? cur = null;
-        if (snap != null && _settings.Media.ShowLyrics)
+        if (snap != null && _settings.Media.ShowLyrics && Sources.MediaSourcePolicy.IsMusicPlayer(snap.SourceId))
         {
-            int posMs = (int)(snap.PositionTicks / TimeSpan.TicksPerMillisecond);
-            cur = _lyrics.CurrentText(posMs, _lyricOffsetMs);
+            int posMs0 = (int)(snap.PositionTicks / TimeSpan.TicksPerMillisecond);
+            cur = _lyrics.CurrentText(posMs0, _lyricOffsetMs);
         }
 
         if (string.IsNullOrEmpty(cur))
@@ -152,33 +154,57 @@ public partial class IslandWindow : Window
             {
                 _cardLyricSig = "";
                 box.Visibility = Visibility.Collapsed;
+                if (_cardLyricScroll != null) _cardLyricScroll.Visibility = Visibility.Collapsed;
             }
             return;
         }
         box.Visibility = Visibility.Visible;
+        if (_cardLyricScroll != null) _cardLyricScroll.Visibility = Visibility.Visible;
 
-        int posMs2 = (int)(snap!.PositionTicks / TimeSpan.TicksPerMillisecond);
-        var ctx = _lyrics.GetContext(posMs2, 1, 2, _lyricOffsetMs);
-        var sig = string.Join("|", ctx.Select(c => c.Text));
+        int posMs = (int)(snap!.PositionTicks / TimeSpan.TicksPerMillisecond);
+        bool showSub = _settings.Media.ShowLyricTranslation;
+        var ctx = _lyrics.GetContextFull(posMs, 3, 5, _lyricOffsetMs, showSub);
+        var sig = string.Join("|", ctx.Select(c => c.Index + ":" + c.Text));
         if (sig == _cardLyricSig) return;      // 行未变，不重建
         _cardLyricSig = sig;
 
-        // 保留分隔线（第 0 个子元素），重建歌词行
-        while (box.Children.Count > 1) box.Children.RemoveAt(box.Children.Count - 1);
         var t = AppTheme.Current;
-        foreach (var (text, isCur) in ctx)
+        box.Children.Clear();
+        double curTop = 0, curH = 0, offset = 0;
+        foreach (var item in ctx)
         {
-            box.Children.Add(new TextBlock
+            var tb = new TextBlock
             {
-                Text = text,
-                FontSize = isCur ? 13.5 : 12.5,
-                FontWeight = isCur ? FontWeights.SemiBold : FontWeights.Normal,
-                Foreground = isCur ? t.TextPrimary : t.TextTertiary,
+                Text = item.Text,
+                FontSize = item.IsCurrent ? 13.5 : 12,
+                FontWeight = item.IsCurrent ? FontWeights.SemiBold : FontWeights.Normal,
+                Foreground = item.IsCurrent ? t.TextPrimary : t.TextTertiary,
                 TextTrimming = TextTrimming.CharacterEllipsis,
-                Margin = new Thickness(0, isCur ? 3 : 1, 0, isCur ? 3 : 1)
-            });
+                Margin = new Thickness(0, item.IsCurrent ? 2 : 1, 0, item.IsCurrent ? 2 : 1),
+                Opacity = item.IsCurrent ? 1.0 : 0.62
+            };
+            box.Children.Add(tb);
+            // 估算高度用于定位当前行（Measure 需布局后才有值，这里用字号估算）
+            double h = (item.IsCurrent ? 13.5 : 12) * 1.9 + (item.IsCurrent ? 4 : 2);
+            if (item.IsCurrent) { curTop = offset; curH = h; }
+            offset += h;
+        }
+
+        // 把当前行滚动到可视区中间，避免当前行落在滚动区外
+        var sv = _cardLyricScroll;
+        if (sv != null)
+        {
+            try
+            {
+                sv.UpdateLayout();
+                double viewH = sv.ViewportHeight > 0 ? sv.ViewportHeight : s_cardLyricMaxHeight;
+                double target = curTop - Math.Max(0, (viewH - curH) / 2.0);
+                sv.ScrollToVerticalOffset(Math.Max(0, target));
+            }
+            catch { /* 布局未就绪时忽略 */ }
         }
     }
+
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
@@ -549,8 +575,9 @@ public partial class IslandWindow : Window
     private readonly Sources.LyricsSource _lyrics = new();
     private int _lyricOffsetMs = 0;                 // 用户微调的歌词偏移（毫秒）
 
-    /// <summary>展开卡歌词容器</summary>
+    /// <summary>展开卡歌词容器与其滚动宿主</summary>
     private StackPanel? _cardLyricBox;
+    private ScrollViewer? _cardLyricScroll;
     private string _cardLyricSig = "";
 
     private Core.Settings _settings = Core.Settings.Load();
@@ -769,16 +796,35 @@ public partial class IslandWindow : Window
         // 媒体：把当前曲目同步给歌词源（内部做了同名去重，不会重复请求）
         if (ev.Kind == "media" && ev.Payload is Sources.MediaSnapshot ms)
         {
-            int durMs = (int)(Math.Max(0, ms.EndTicks) / TimeSpan.TicksPerMillisecond);
-            _lyrics.UpdateTrack(ms.Title, ms.Artist, ms.Album, durMs);
+            // 只有音乐播放器才查歌词（浏览器放视频不查，省流量也避免误匹配）
+            if (Sources.MediaSourcePolicy.IsMusicPlayer(ms.SourceId))
+            {
+                int durMs = (int)(Math.Max(0, ms.EndTicks) / TimeSpan.TicksPerMillisecond);
+                _lyrics.UpdateTrack(ms.Title, ms.Artist, ms.Album, durMs);
+            }
         }
 
-        // 【关键】按当前形态重建：展开态必须继续用卡片模板，
-        // 否则暂停事件会把进度条/控制按钮打回胶囊（表现为"暂停后按钮消失"）
-        bool keepCard = item.ContentKey == "card";
-        var content = keepCard ? BuildCard(ev) : BuildContent(ev);
-        if (content != null && item.Visual.Child is ContentPresenter cp)
-            cp.Content = content;
+        // 【关键】媒体进度推送（约 900ms 一次）不要重建内容：
+        // 重建会造出新的 TextBlock（空文本），而歌词"文本未变"就不再赋值，
+        // 于是每行歌词显示约 900ms 后变空白 —— 表现为"消失时间固定且不正确"。
+        // 只有曲目 / 播放态真正变化时才重建；进度由 RefreshMediaCard 每帧更新。
+        bool needRebuild = true;
+        if (ev.Kind == "media" && ev.Payload is Sources.MediaSnapshot msig)
+        {
+            var sig = msig.Title + "|" + msig.Artist + "|" + msig.IsPlaying;
+            needRebuild = item.MediaSig != sig;
+            item.MediaSig = sig;
+        }
+
+        if (needRebuild)
+        {
+            // 【关键】按当前形态重建：展开态必须继续用卡片模板，
+            // 否则暂停事件会把进度条/控制按钮打回胶囊（表现为"暂停后按钮消失"）
+            bool keepCard = item.ContentKey == "card";
+            var content = keepCard ? BuildCard(ev) : BuildContent(ev);
+            if (content != null && item.Visual.Child is ContentPresenter cp)
+                cp.Content = content;
+        }
 
         // 媒体暂停 → 启动自动收起计时
         if (ev.Kind == "media" && ev.Payload is Sources.MediaSnapshot snap)
@@ -1248,20 +1294,6 @@ public partial class IslandWindow : Window
         _cardParts.RemainText = right;
         _cardParts.Track = track;
 
-        // 歌词区（展开态）：当前行 + 上下文，当前行高亮
-        if (_settings.Media.ShowLyrics)
-        {
-            var lyBox = new StackPanel { Margin = new Thickness(0, 12, 0, 0) };
-            var lySep = new Border
-            {
-                Height = 1, Background = AppTheme.Current.Stroke, Opacity = 0.5,
-                Margin = new Thickness(0, 0, 0, 8)
-            };
-            lyBox.Children.Add(lySep);
-            _cardLyricBox = lyBox;
-            root.Children.Add(lyBox);
-        }
-
         // 控制按钮 ⏮ ⏯ ⏭
         var ctl = new StackPanel
         {
@@ -1276,6 +1308,32 @@ public partial class IslandWindow : Window
         ctl.Children.Add(playBtn);
         ctl.Children.Add(MakeIconControlButton("next", () => _media?.NextAsync(sid), t, 34));
         root.Children.Add(ctl);
+
+        // ---- 歌词区（放在控制按钮【下面】）----
+        // 自适应高度但有上限；超出用滚动条，避免卡片被歌词无限撑高。
+        if (_settings.Media.ShowLyrics && Sources.MediaSourcePolicy.IsMusicPlayer(snap.SourceId))
+        {
+            var lySep = new Border
+            {
+                Height = 1, Background = t.Stroke, Opacity = 0.5,
+                Margin = new Thickness(0, 12, 0, 8)
+            };
+            root.Children.Add(lySep);
+
+            var lyInner = new StackPanel();
+            _cardLyricBox = lyInner;
+
+            var lyScroll = new ScrollViewer
+            {
+                Content = lyInner,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                MaxHeight = s_cardLyricMaxHeight,      // 限高：最多约 4 行
+                Padding = new Thickness(0, 0, 6, 0)    // 给滚动条留位
+            };
+            _cardLyricScroll = lyScroll;
+            root.Children.Add(lyScroll);
+        }
         _cardParts!.PlayGlyphHost = playBtn.Child as Border;
         _cardParts.PlayGlyphName = snap.IsPlaying ? "pause" : "play";
         return root;
@@ -2100,6 +2158,8 @@ public partial class IslandWindow : Window
         _pillLyricText = lyricText;
         _pillLyricRow = lyricRow;
         _pillLyricHost = textCol;
+        _lastLyricText = "";        // 新元素是空的：强制下一帧重新赋值，避免歌词空白
+        _lyricNeedScroll = false;
 
         Grid.SetColumn(textCol, 1);
         grid.Children.Add(textCol);
@@ -2171,7 +2231,7 @@ public partial class IslandWindow : Window
             // 实现三段式第②步"歌词放不下时先把岛加宽"
             var snap = ev.Payload as Sources.MediaSnapshot;
             string? lyric = null;
-            if (snap != null && _settings.Media.ShowLyrics)
+            if (snap != null && _settings.Media.ShowLyrics && Sources.MediaSourcePolicy.IsMusicPlayer(snap.SourceId))
             {
                 int posMs = (int)(snap.PositionTicks / TimeSpan.TicksPerMillisecond);
                 lyric = _lyrics.CurrentText(posMs, _lyricOffsetMs);
@@ -2237,52 +2297,102 @@ public partial class IslandWindow : Window
         if (tb == null || row == null) return;
 
         string? text = null;
-        if (snap != null && _settings.Media.ShowLyrics)
+        int posMs = 0;
+        // 歌词只对音乐播放器生效：浏览器/视频播放器不显示歌词
+        if (snap != null && _settings.Media.ShowLyrics && Sources.MediaSourcePolicy.IsMusicPlayer(snap.SourceId))
         {
-            int posMs = (int)(snap.PositionTicks / TimeSpan.TicksPerMillisecond);
+            posMs = (int)(snap.PositionTicks / TimeSpan.TicksPerMillisecond);
             text = _lyrics.CurrentText(posMs, _lyricOffsetMs);
         }
 
+        // 无歌词 / 未同步 / 纯音乐：隐藏第二行，胶囊回单行
         if (string.IsNullOrWhiteSpace(text))
         {
-            row.Visibility = Visibility.Collapsed;
-            _lastLyricText = "";
-            _lyricNeedScroll = false;
+            if (_lastLyricText != "")
+            {
+                _lastLyricText = "";
+                StopLyricScroll(tb);
+                row.Visibility = Visibility.Collapsed;
+            }
             return;
         }
         row.Visibility = Visibility.Visible;
 
-        if (text != _lastLyricText)
+        // ---- 行切换：只在换行时重建文本与动画（不要每帧重建，否则动画永远停在起点）----
+        bool lineChanged = text != _lastLyricText;
+        if (lineChanged)
         {
             _lastLyricText = text!;
             tb.Text = text;
-            tb.RenderTransform = Transform.Identity;
+            StopLyricScroll(tb);
         }
 
+        // ---- 三段式宽度判断（缩放感知）----
         double scale = IslandMetrics.Scale <= 0 ? 1.0 : IslandMetrics.Scale;
         double need = MeasureText(text!, 11);
         double avail = row.ActualWidth;
         if (avail <= 0) avail = Math.Max(60, IslandMetrics.MaxWidth / scale - 56);
         double capW = IslandMetrics.MaxWidth / scale - 56;
 
-        if (need <= avail - 1 || need <= capW)
+        bool fits = need <= avail - 1 || need <= capW;
+        if (fits)
         {
-            _lyricNeedScroll = false;
-            tb.RenderTransform = Transform.Identity;
+            if (_lyricNeedScroll) { StopLyricScroll(tb); _lyricNeedScroll = false; }
+            return;
         }
-        else if (_settings.Media.LyricAutoScroll)
+
+        // ---- ③ 到上限仍放不下：自动滚动 ----
+        if (!_settings.Media.LyricAutoScroll)
         {
-            _lyricNeedScroll = true;
-            _lyricScrollShift = need - avail;
-            var tx = tb.RenderTransform as TranslateTransform ?? new TranslateTransform();
-            double dur = Math.Max(4, _lyricScrollShift / 40.0);
-            var anim = new System.Windows.Media.Animation.DoubleAnimation(0, -_lyricScrollShift,
-                TimeSpan.FromSeconds(dur))
-            { RepeatBehavior = System.Windows.Media.Animation.RepeatBehavior.Forever, AutoReverse = true };
-            tx.BeginAnimation(TranslateTransform.XProperty, anim);
-            tb.RenderTransform = tx;
+            if (_lyricNeedScroll) { StopLyricScroll(tb); _lyricNeedScroll = false; }
+            return;
         }
+        if (!lineChanged && _lyricNeedScroll) return;   // 动画已在本行运行，别重启
+
+        _lyricNeedScroll = true;
+        double shift = need - avail + 8;
+        _lyricScrollShift = shift;
+
+        // 在本行剩余停留时间内单向滚完一轮（停留-滚动-停留），不来回、不固定周期。
+        // 行时长来自 LRC 的下一行 StartMs（EndMs 常为 null）。
+        int span = _lyrics.GetCurrentLineSpanMs(posMs, _lyricOffsetMs);
+        double scrollSec = Math.Clamp(shift / 45.0, 1.5, 8.0);        // 按距离定滚动时长
+        double holdSec = 1.2;                                          // 首尾各停留
+        double totalSec = Math.Max(scrollSec + holdSec * 2, span / 1000.0 - 0.3);
+        holdSec = Math.Max(0.35, (totalSec - scrollSec) / 2);
+
+        var tx = new TranslateTransform();
+        tb.RenderTransform = tx;
+        double holdFrac = holdSec / totalSec;
+        double scrollFrac = scrollSec / totalSec;
+        // 关键帧：停留 → 单向滚到底 → 停留（不 AutoReverse）
+        var anim = new System.Windows.Media.Animation.DoubleAnimationUsingKeyFrames
+        {
+            Duration = TimeSpan.FromSeconds(totalSec),
+            RepeatBehavior = System.Windows.Media.Animation.RepeatBehavior.Forever
+        };
+        anim.KeyFrames.Add(new System.Windows.Media.Animation.LinearDoubleKeyFrame(
+            0, System.Windows.Media.Animation.KeyTime.FromPercent(0)));
+        anim.KeyFrames.Add(new System.Windows.Media.Animation.LinearDoubleKeyFrame(
+            0, System.Windows.Media.Animation.KeyTime.FromPercent(holdFrac)));
+        anim.KeyFrames.Add(new System.Windows.Media.Animation.LinearDoubleKeyFrame(
+            -shift, System.Windows.Media.Animation.KeyTime.FromPercent(holdFrac + scrollFrac)));
+        anim.KeyFrames.Add(new System.Windows.Media.Animation.LinearDoubleKeyFrame(
+            -shift, System.Windows.Media.Animation.KeyTime.FromPercent(1.0)));
+        tx.BeginAnimation(TranslateTransform.XProperty, anim);
     }
+
+    /// <summary>停止并复位歌词滚动（换行 / 恢复单行时调用）</summary>
+    private static void StopLyricScroll(TextBlock tb)
+    {
+        if (tb.RenderTransform is TranslateTransform tx)
+        {
+            tx.BeginAnimation(TranslateTransform.XProperty, null);
+            tx.X = 0;
+        }
+        tb.RenderTransform = Transform.Identity;
+    }
+
 
     // ---------- 每帧渲染 ----------
     private DateTime _lastSelfHeal = DateTime.MinValue;

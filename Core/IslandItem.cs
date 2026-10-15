@@ -65,6 +65,13 @@ public sealed class IslandItem
     /// 供 ClusterStack 计算展开卡的目标高度，避免写死高度导致留白 / 裁切。
     /// </summary>
     public double MeasuredCardHeight { get; set; }
+
+    /// <summary>
+    /// 媒体内容的"结构签名"（标题|作者|播放态）。
+    /// 仅当签名变化时才重建胶囊内容；纯进度推送（约 900ms 一次）不重建，
+    /// 否则会造出空白 TextBlock 导致歌词显示约 900ms 后消失。
+    /// </summary>
+    public string MediaSig { get; set; } = "";
     public DateTime? TtlStart { get; set; }
 
     // 几何弹簧

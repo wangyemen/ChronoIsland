@@ -98,6 +98,27 @@ public sealed class LyricsSource : IDisposable
         return cur != null && i < cur.Lines.Count ? cur.Lines[i].Text : null;
     }
 
+    /// <summary>
+    /// 当前行的实际持续时间（毫秒），用于让滚动在"本行结束前"滚完一轮。
+    /// LRCLIB 等来源的 EndMs 常为 null，此时用下一行的 StartMs 推算；
+    /// 末行则给一个保守默认值。
+    /// </summary>
+    public int GetCurrentLineSpanMs(int positionMs, int offsetMs = 0)
+    {
+        var cur = Current;
+        if (cur == null || cur.Lines.Count == 0) return 0;
+        int i = FindLineIndex(positionMs, offsetMs);
+        if (i < 0) return 0;
+
+        var lines = cur.Lines;
+        var ln = lines[i];
+        if (ln.EndMs.HasValue && ln.EndMs.Value > ln.StartMs)
+            return ln.EndMs.Value - ln.StartMs;
+        if (i + 1 < lines.Count)
+            return Math.Max(600, lines[i + 1].StartMs - ln.StartMs);
+        return 4000;
+    }
+
     /// <summary>取上下文行（当前行前后若干行），供展开卡使用</summary>
     public List<(string Text, bool IsCurrent)> GetContext(int positionMs, int before = 1, int after = 2,
                                                           int offsetMs = 0)
@@ -111,6 +132,31 @@ public sealed class LyricsSource : IDisposable
         int to = Math.Min(cur.Lines.Count - 1, idx + after);
         for (int i = from; i <= to; i++)
             res.Add((cur.Lines[i].Text, i == idx));
+        return res;
+    }
+
+    /// <summary>
+    /// 取上下文行（含索引与当前行标记），供展开卡使用。
+    /// before/after 控制前后行数；withSub 为 true 时把翻译行也一并返回。
+    /// </summary>
+    public List<(int Index, string Text, bool IsCurrent)> GetContextFull(
+        int positionMs, int before = 3, int after = 5, int offsetMs = 0, bool withSub = false)
+    {
+        var res = new List<(int, string, bool)>();
+        var cur = Current;
+        if (cur == null || cur.Lines.Count == 0) return res;
+        int idx = FindLineIndex(positionMs, offsetMs);
+        if (idx < 0) return res;
+
+        int from = Math.Max(0, idx - before);
+        int to = Math.Min(cur.Lines.Count - 1, idx + after);
+        for (int i = from; i <= to; i++)
+        {
+            var ln = cur.Lines[i];
+            res.Add((i, ln.Text, i == idx));
+            if (withSub && !string.IsNullOrWhiteSpace(ln.SubText))
+                res.Add((i, ln.SubText!, false));      // 翻译行紧随原文，不标为当前行
+        }
         return res;
     }
 
