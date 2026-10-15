@@ -613,8 +613,6 @@ public partial class IslandWindow : Window
     private DateTime _lyricUserScrollAt = DateTime.MinValue;
     /// <summary>卡片内容滚动宿主（超出高度上限时滚动而非裁切）</summary>
     private ScrollViewer? _cardScrollHost;
-    /// <summary>歌词内容变化后需重新实测卡片高度（歌词异步晚到）</summary>
-    private bool _cardNeedsRemeasure;
     /// <summary>展开卡：标题右侧的歌词控件（含横向滚动）</summary>
     private TextBlock? _cardLyricText;
     private TextBlock? _cardLyricPrev;
@@ -626,7 +624,6 @@ public partial class IslandWindow : Window
     private DateTime _cardExpandedAt = DateTime.MinValue;
 
     /// <summary>上次校正展开卡高度的时刻（节流用）</summary>
-    private DateTime _lastCardHeightFix = DateTime.MinValue;
 
     private Core.Settings _settings = Core.Settings.Load();
 
@@ -999,33 +996,40 @@ public partial class IslandWindow : Window
     /// 离屏容器宽高都设为 double.PositiveInfinity，让 WPF 按内容自然撑开。
     /// 夹在 [CardMinHeight, CardMaxHeight]，避免极端内容把卡撑爆或塌成一坨。
     /// </summary>
-        private static double MeasureCardContent(FrameworkElement content, double width)
+    /// <summary>
+    /// 实测卡片内容所需高度（未缩放逻辑值）。
+    /// 调用方必须传入【尚未挂载到视觉树】的元素 —— 已挂载的元素其
+    /// DesiredSize.Height 会被父级拉伸，测出来的不是内容真实需求。
+    /// </summary>
+    private static double MeasureCardContent(FrameworkElement content, double width)
     {
         try
         {
-            // 量【整棵内容树】（含外层 Grid/Border），不要绕过 ScrollViewer：
-            // 歌词区靠 ScrollViewer.Height 撑开（0 或 220），绕过它就测不到那 220，
-            // 卡片高度会永远停在"无歌词"的 174 → 歌词区被裁、进度条按钮错位。
-            // 【必须 InvalidateMeasure】：WPF 对已测量过的元素不会重新测量，
-            // 改了子元素 Height 后不失效就仍返回旧值。
-            InvalidateTree(content);
-
-            // 【不能把已挂载的 live 元素再挂到新父级】WPF 会抛
-            // InvalidOperationException: 指定的元素已经是另一个元素的逻辑子元素。
-            // 这里直接对现有元素测量（content 本身已是 ContentPresenter 的内容），
-            // 只给宽度约束，让它按内容自然撑开。
             content.Measure(new Size(Math.Max(1, width), double.PositiveInfinity));
             var h = content.DesiredSize.Height;
-
-            double scale = IslandMetrics.Scale <= 0 ? 1.0 : IslandMetrics.Scale;
-            return double.IsNaN(h) || double.IsInfinity(h) || h <= 0
-                ? 0
-                : Math.Clamp(h * scale,
-                             IslandMetrics.CardMinHeight * scale,
-                             IslandMetrics.CardMaxHeight * scale);
+            if (double.IsNaN(h) || double.IsInfinity(h) || h <= 0) return 0;
+            return Math.Clamp(h, IslandMetrics.CardMinHeight, IslandMetrics.CardMaxHeight);
         }
-        catch (Exception) { return 0; }
+        catch { return 0; }
     }
+
+
+    /// <summary>
+    /// 复制一棵元素树的布局信息，用于离屏测量。
+    /// WPF 没有内置深拷贝，这里用 XAML 序列化 / 反序列化复制样式与子结构。
+    /// 复制失败时返回 null（调用方按 0 处理，不影响主流程）。
+    /// </summary>
+    private static FrameworkElement? CloneForMeasure(FrameworkElement src)
+    {
+        try
+        {
+            var xaml = System.Windows.Markup.XamlWriter.Save(src);
+            using var reader = System.Xml.XmlReader.Create(new StringReader(xaml));
+            return System.Windows.Markup.XamlReader.Load(reader) as FrameworkElement;
+        }
+        catch { return null; }
+    }
+
 
 
     private FrameworkElement WrapWithClose(FrameworkElement body)
@@ -2735,69 +2739,22 @@ public partial class IslandWindow : Window
                 var c = wantCard ? BuildCard(item.Event)
                       : wantSphere ? BuildSphere(item.Event)
                       : BuildContent(item.Event);
-                if (c != null && b.Child is ContentPresenter cp) cp.Content = c;
-                if (!wantCard) _cardParts = null;   // 收起后不再刷新进度
 
-                // 展开卡：按内容实测高度，供 ClusterStack 计算目标高度。
-                // 【关键】实测到的是"未缩放"的内容高度，而渲染时
-                //   b.Height = item.Height.Value * Scale
-                // 内容区实际可用高度 = 内容高 × Scale，所以这里必须乘回去，
-                // 否则整体缩放 >1（如 1.35×）会把底部按钮裁掉。
-                // 歌词晚到 / 内容高度变化 → 需要重新实测（此时卡片内容不必重建）
-                if (wantCard && _cardNeedsRemeasure)
-                {
-                    _cardNeedsRemeasure = false;
-                    var existing = (b.Child as ContentPresenter)?.Content as FrameworkElement;
-                    if (existing != null)
-                    {
-                        double sc2 = IslandMetrics.Scale <= 0 ? 1.0 : IslandMetrics.Scale;
-                        double m2 = MeasureCardContent(existing, cwForCard() / sc2);
-                        if (m2 > 0 && Math.Abs(m2 - item.MeasuredCardHeight) > 0.5)
-                        {
-                            item.MeasuredCardHeight = m2;
-                            _lastLayoutSignature = null;
-                        }
-                    }
-                }
+                // 【先测高，再挂载】c 尚未进入视觉树时 Measure 得到的是
+                // 内容真实需求；挂到 ContentPresenter 之后再测，DesiredSize
+                // 会被父级拉伸，测出虚高值 —— 表现为卡片下方永远留大片空白。
                 if (wantCard && c != null)
                 {
-                    // 宽度也要按缩放还原：内容是在"放大后的框"里排版的
                     double sc = IslandMetrics.Scale <= 0 ? 1.0 : IslandMetrics.Scale;
-                    double measured = MeasureCardContent(c, cwForCard() / sc);
-                    // 纯自适应：高度 = 内容实测（歌词区用 MaxHeight 自适应，内容少就矮）
-                    if (measured > 0 && Math.Abs(measured - item.MeasuredCardHeight) > 0.5)
-                    {
-                        item.MeasuredCardHeight = measured;
-                        _lastLayoutSignature = null;   // 强制下一帧重算槽位
-                    }
+                    double m = MeasureCardContent(c, cwForCard() / sc);
+                    if (m > 0) item.MeasuredCardHeight = m;
                 }
+
+                if (c != null && b.Child is ContentPresenter cp) cp.Content = c;
+                if (!wantCard) _cardParts = null;
+                _lastLayoutSignature = null;   // 强制下一帧重算槽位
             }
 
-            // 【展开态卡片高度：每帧校正】
-            // 高度不能只在"内容重建"时测：歌词挪到标题行后内容不再重建，
-            // MeasuredCardHeight 会一直用旧值（偏大），导致按钮下方留一片空白。
-            // 这里对展开卡每帧重测，与实测偏差 > 0.5px 就更新（弹簧平滑过渡）。
-            // 节流：每 250ms 校正一次，避免每帧 Measure 的性能开销
-            bool fixNow = DateTime.Now - _lastCardHeightFix >= TimeSpan.FromMilliseconds(250);
-            if (fixNow) _lastCardHeightFix = DateTime.Now;
-            if (fixNow && wantCard)
-            {
-                var cur = (b.Child as ContentPresenter)?.Content as FrameworkElement;
-                if (cur != null)
-                {
-                    double sc = IslandMetrics.Scale <= 0 ? 1.0 : IslandMetrics.Scale;
-                    double m = MeasureCardContent(cur, cwForCard() / sc);
-                    if (m > 0 && Math.Abs(m - item.MeasuredCardHeight) > 0.5)
-                    {
-                        item.MeasuredCardHeight = m;
-                        _lastLayoutSignature = null;
-                    }
-                }
-            }
-
-            // 内容对齐：胶囊/卡片的内容必须填满（Stretch），
-            // 球体的居中由 BuildSphere 内部固定尺寸的 Grid 自行处理。
-            // 不在此处动态切换对齐 —— 切换时机难以把握，会污染胶囊布局。
             if (b.Child is ContentPresenter cp2)
             {
                 cp2.HorizontalAlignment = HorizontalAlignment.Stretch;
