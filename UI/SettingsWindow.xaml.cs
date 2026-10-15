@@ -556,6 +556,18 @@ public partial class SettingsWindow : Window
                 v => _settings.Media.BrowserAsFallback = v)),
             Row("启用媒体模块", "关闭后不读取任何媒体信息", Toggle(_settings.Media.Enabled,
                 v => _settings.Media.Enabled = v))));
+
+        // ---- 歌词 ----
+        sp.Children.Add(new Border { Height = 16 });
+        sp.Children.Add(Group("歌词", Desc("来源：QQ音乐 → 网易云 → LRCLIB，命中即缓存；仅本地展示，不分发歌词数据"),
+            Row("显示歌词", "胶囊态在标题下方显示当前行；开启后胶囊会增高一行",
+                Toggle(_settings.Media.ShowLyrics, v => _settings.Media.ShowLyrics = v)),
+            Row("歌词放不下时自动滚动", "关闭则直接截断",
+                Toggle(_settings.Media.LyricAutoScroll, v => _settings.Media.LyricAutoScroll = v)),
+            Row("显示翻译行", "部分来源提供歌词翻译",
+                Toggle(_settings.Media.ShowLyricTranslation, v => _settings.Media.ShowLyricTranslation = v)),
+            SliderRow("歌词时间轴偏移", _settings.Media.LyricOffsetMs, -3000, 3000, "毫秒",
+                v => _settings.Media.LyricOffsetMs = (int)v)));
         return sp;
     }
 
