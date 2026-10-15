@@ -1008,27 +1008,18 @@ public partial class IslandWindow : Window
             content.Measure(new Size(Math.Max(1, width), double.PositiveInfinity));
             var h = content.DesiredSize.Height;
             if (double.IsNaN(h) || double.IsInfinity(h) || h <= 0) return 0;
-            return Math.Clamp(h, IslandMetrics.CardMinHeight, IslandMetrics.CardMaxHeight);
+            // 【口径必须与渲染端一致】渲染时是 b.Height = item.Height.Value × Scale，
+            // 所以这里也要乘 scale，否则卡片会多出 (scale-1)×内容高 的空白。
+            double sc = IslandMetrics.Scale <= 0 ? 1.0 : IslandMetrics.Scale;
+            return Math.Clamp(h * sc,
+                              IslandMetrics.CardMinHeight * sc,
+                              IslandMetrics.CardMaxHeight * sc);
         }
         catch { return 0; }
     }
 
 
-    /// <summary>
-    /// 复制一棵元素树的布局信息，用于离屏测量。
-    /// WPF 没有内置深拷贝，这里用 XAML 序列化 / 反序列化复制样式与子结构。
-    /// 复制失败时返回 null（调用方按 0 处理，不影响主流程）。
-    /// </summary>
-    private static FrameworkElement? CloneForMeasure(FrameworkElement src)
-    {
-        try
-        {
-            var xaml = System.Windows.Markup.XamlWriter.Save(src);
-            using var reader = System.Xml.XmlReader.Create(new StringReader(xaml));
-            return System.Windows.Markup.XamlReader.Load(reader) as FrameworkElement;
-        }
-        catch { return null; }
-    }
+
 
 
 
