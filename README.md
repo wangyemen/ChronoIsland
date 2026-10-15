@@ -17,6 +17,13 @@ Windows 桌面灵动岛。默认**屏幕上什么都没有**——来通知、�
 > [styles.html](<designWeb/styles.html>) 与 [demo.html](<designWeb/demo.html>)，另新增 [index.html](<designWeb/index.html>) 作为网站首页。
 > 发布网站时请拷贝整个 <designWeb/> 文件夹；两个根目录旧文件暂时保留以便对照，确认无误后可删除。
 
+## 许可
+
+本项目代码采用 **MIT License**，详见 [LICENSE](LICENSE)。
+
+界面图标全部来自 [Lucide](https://lucide.dev)（**ISC License**），第三方许可声明见
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
+
 ## 图标
 
 程序图标在 <assets/icon.ico>（7 个尺寸 16–256）。双尺寸源文件备份在 <assets/icon-concepts/>。
