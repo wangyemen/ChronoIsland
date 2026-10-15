@@ -40,8 +40,8 @@ public partial class IslandWindow : Window
     private Sources.MediaSource? _media;
     private Sources.SysStateSource? _sys;   // 键位 + 会话解锁（docs §5.5）
     private static readonly double s_progressTrackWidth = 388;
-    /// <summary>展开卡歌词区高度（当前行 + 上下各 2 行 = 5 行），超出用滚动条</summary>
-    private static readonly double s_cardLyricMaxHeight = 150;
+    /// <summary>展开卡歌词区高度（当前行 + 上下各 3 行 = 7 行），超出用滚动条</summary>
+    private static readonly double s_cardLyricMaxHeight = 220;
     private MediaCardParts? _cardParts;
     /// <summary>最近一次卡片内按钮操作的时间（用于屏蔽冒泡）</summary>
     private DateTime _lastCardAction = DateTime.MinValue;
@@ -175,7 +175,7 @@ public partial class IslandWindow : Window
 
         int posMs = (int)(snap!.PositionTicks / TimeSpan.TicksPerMillisecond);
         bool showSub = _settings.Media.ShowLyricTranslation;
-        var ctx = _lyrics.GetContextFull(posMs, 2, 2, _lyricOffsetMs, showSub);   // 当前行 + 上下各 2 行 = 5 行
+        var ctx = _lyrics.GetContextFull(posMs, 3, 3, _lyricOffsetMs, showSub);   // 当前行 + 上下各 3 行 = 7 行
         var sig = string.Join("|", ctx.Select(c => c.Index + ":" + c.Text));
         // 【坑】ctx 为空时 sig 也是空串，而 _cardLyricSig 初值同为空串，
         // 两空相等会直接 return → 歌词永远不被填充（表现为"展开卡没歌词"）。
@@ -210,7 +210,8 @@ public partial class IslandWindow : Window
 
         // 把当前行滚动到可视区中间，避免当前行落在滚动区外
         var sv = _cardLyricScroll;
-        if (sv != null)
+        // 用户手动滚动后 4 秒内不自动跟随，避免"上滚立刻被拉回"
+        if (sv != null && DateTime.Now - _lyricUserScrollAt > TimeSpan.FromSeconds(4))
         {
             try
             {
@@ -602,6 +603,8 @@ public partial class IslandWindow : Window
     private StackPanel? _cardLyricBox;
     private ScrollViewer? _cardLyricScroll;
     private Border? _cardLyricSep;
+    /// <summary>用户上次手动滚动歌词的时间（4 秒内不自动跟随，避免上滚被拉回）</summary>
+    private DateTime _lyricUserScrollAt = DateTime.MinValue;
     /// <summary>卡片内容滚动宿主（超出高度上限时滚动而非裁切）</summary>
     private ScrollViewer? _cardScrollHost;
     /// <summary>歌词内容变化后需重新实测卡片高度（歌词异步晚到）</summary>
@@ -995,21 +998,12 @@ public partial class IslandWindow : Window
         // —— 之前通知卡底部按钮被裁、歌词看不见，就是硬裁切造成的。
         // 滚动条：默认 Hidden（不占宽度、不显示），只在鼠标进入卡片时才细显示。
         // 之前用 Auto，Windows 默认滚动条又粗又显眼，横在卡片里很难看。
-        var sv = new ScrollViewer
-        {
-            Content = body,
-            VerticalScrollBarVisibility = ScrollBarVisibility.Hidden,
-            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-            MaxHeight = IslandMetrics.CardMaxHeight,
-            Padding = new Thickness(0)
-        };
-        // 悬停时允许滚轮滚动（Hidden 不影响滚轮），并临时显示细滚动条
-        sv.MouseEnter += (_, _) => { sv.VerticalScrollBarVisibility = ScrollBarVisibility.Auto; ApplyThinScrollBar(sv); };
-        sv.MouseLeave += (_, _) => sv.VerticalScrollBarVisibility = ScrollBarVisibility.Hidden;
-        _cardScrollHost = sv;
-
+        // 【不套外层 ScrollViewer】
+        // 给整张卡片套 ScrollViewer 会造成「两层滚动嵌套」：
+        // 外层（卡片）与内层（歌词区）争抢滚轮，表现为"只能下滚、上滚没反应"。
+        // 现在卡片高度按屏幕动态上限自适应，内容超限时由内层（歌词区）自己滚。
         var host = new Grid();
-        host.Children.Add(sv);
+        host.Children.Add(body);
         host.Children.Add(BuildCloseButton(AppTheme.Current));
         return host;
     }
@@ -1407,13 +1401,28 @@ public partial class IslandWindow : Window
         var lyScroll = new ScrollViewer
         {
             Content = lyInner,
-            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            // 默认隐藏滚动条（不占宽、不抢眼），鼠标进入才显示胶囊细条
+            VerticalScrollBarVisibility = ScrollBarVisibility.Hidden,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
             Height = 0,                            // 歌词到位后设为 s_cardLyricMaxHeight
             Padding = new Thickness(0, 0, 6, 0),
             Visibility = Visibility.Visible
         };
+        lyScroll.MouseEnter += (_, _) =>
+        {
+            lyScroll.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+            ApplyThinScrollBar(lyScroll);
+        };
+        lyScroll.MouseLeave += (_, _) =>
+        {
+            lyScroll.VerticalScrollBarVisibility = ScrollBarVisibility.Hidden;
+            _lyricUserScrollAt = DateTime.MinValue;   // 离开后恢复自动跟随
+        };
+        // 用户手动滚动 → 暂停自动跟随 4 秒（否则下一句歌词立刻把位置拉回，
+        // 表现为"滚轮只能下滚、上滚没反应"）
+        lyScroll.PreviewMouseWheel += (_, _) => _lyricUserScrollAt = DateTime.Now;
         _cardLyricScroll = lyScroll;
+        root.Children.Add(lyScroll);
         root.Children.Add(lyScroll);
         _cardParts!.PlayGlyphHost = playBtn.Child as Border;
         _cardParts.PlayGlyphName = snap.IsPlaying ? "pause" : "play";
@@ -2335,24 +2344,75 @@ public partial class IslandWindow : Window
     /// 把卡片里的滚动条改造成"细、圆角、低对比"样式，融入玻璃卡。
     /// Windows 默认滚动条约 17px 宽且带箭头按钮，放在卡片里非常突兀。
     /// </summary>
-    private static void ApplyThinScrollBar(DependencyObject root)
+        private static void ApplyThinScrollBar(DependencyObject root)
     {
+        // 用自定义模板替换 WPF 默认滚动条（默认约 17px 宽 + 上下箭头按钮，很丑）。
+        // 目标：6px 宽胶囊滑块、无箭头、无轨道底色、低对比，融入玻璃卡。
         try
         {
             foreach (var sb in FindAll<System.Windows.Controls.Primitives.ScrollBar>(root))
             {
-                if (sb.Tag as string == "thin") continue;
-                sb.Tag = "thin";
-                sb.Width = 4;
-                sb.Opacity = 0.5;
-                foreach (var rb in FindAll<System.Windows.Controls.Primitives.RepeatButton>(sb))
-                    rb.Visibility = Visibility.Collapsed;
-                foreach (var tr in FindAll<System.Windows.Controls.Primitives.Track>(sb))
-                    tr.Margin = new Thickness(0);
+                if (sb.Tag as string == "glass") continue;
+                sb.Tag = "glass";
+
+                var t = AppTheme.Current;
+                var thumb = new System.Windows.Controls.Primitives.Thumb
+                {
+                    Width = 6,
+                    MinHeight = 28,
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    Template = BuildPillThumbTemplate(t)
+                };
+                var track = new System.Windows.Controls.Primitives.Track
+                {
+                    Orientation = Orientation.Vertical,
+                    Thumb = thumb,
+                    IsDirectionReversed = true
+                };
+                var tpl = new ControlTemplate(typeof(System.Windows.Controls.Primitives.ScrollBar));
+                tpl.VisualTree = new FrameworkElementFactory(typeof(Grid));
+                var gf = tpl.VisualTree;
+                var trk = new FrameworkElementFactory(typeof(System.Windows.Controls.Primitives.Track));
+                trk.Name = "PART_Track";
+                trk.SetValue(System.Windows.Controls.Primitives.Track.OrientationProperty, Orientation.Vertical);
+                trk.SetValue(System.Windows.Controls.Primitives.Track.IsDirectionReversedProperty, true);
+                var th = new FrameworkElementFactory(typeof(System.Windows.Controls.Primitives.Thumb));
+                th.SetValue(FrameworkElement.WidthProperty, 6.0);
+                th.SetValue(FrameworkElement.MinHeightProperty, 28.0);
+                th.SetValue(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Center);
+                th.SetValue(System.Windows.Controls.Primitives.Thumb.TemplateProperty, BuildPillThumbTemplate(t));
+                trk.AppendChild(th);
+                gf.AppendChild(trk);
+                sb.Template = tpl;
+                sb.Width = 6;
+                sb.Background = Brushes.Transparent;
             }
         }
-        catch { /* 样式失败不影响功能 */ }
+        catch { /* 样式失败不影响功能，退化为默认滚动条 */ }
     }
+
+    /// <summary>胶囊形滑块模板：圆角 3、半透明、悬停变亮</summary>
+    private static ControlTemplate BuildPillThumbTemplate(ThemeTokens t)
+    {
+        var tpl = new ControlTemplate(typeof(System.Windows.Controls.Primitives.Thumb));
+        var b = new FrameworkElementFactory(typeof(Border));
+        b.SetValue(Border.CornerRadiusProperty, new CornerRadius(3));
+        b.SetValue(Border.BackgroundProperty, new SolidColorBrush(Color.FromArgb(70, 128, 128, 138)));
+        var trigger = new Trigger
+        {
+            Property = UIElement.IsMouseOverProperty,
+            Value = true
+        };
+        trigger.Setters.Add(new Setter(Border.BackgroundProperty,
+            new SolidColorBrush(Color.FromArgb(130, 110, 110, 125)), "b"));
+        // 命名 Border 以便触发器定位
+        b.Name = "b";
+        tpl.VisualTree = b;
+        tpl.Triggers.Add(trigger);
+        return tpl;
+    }
+
+
 
     /// <summary>查找所有指定类型的后代</summary>
     private static IEnumerable<T> FindAll<T>(DependencyObject? parent) where T : DependencyObject

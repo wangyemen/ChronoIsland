@@ -12,12 +12,35 @@ public static class IslandMetrics
     public const double CardWidth = 420;
     public const double CardMinHeight = 96;
     /// <summary>
-    /// 详情卡高度上限（未缩放逻辑值）。
-    /// 媒体卡 = 封面行 + 进度条 + 时间 + 控制按钮 + 歌词区，内容较高；
-    /// 通知卡正文长时也会超过 400。取 460 兼顾两者，
-    /// 超出部分由卡片内滚动条承载，不会无限增长。
+    /// 详情卡高度下限（未缩放逻辑值）。
     /// </summary>
-    public const double CardMaxHeight = 460;
+    public const double CardHeightFloor = 600;
+
+    /// <summary>
+    /// 详情卡高度上限（未缩放逻辑值）——按屏幕可用高度动态算，不写死。
+    /// 取"屏幕工作区高度 × 0.72 ÷ 缩放"，保证：
+    ///   · 卡片尽量高（媒体卡带 5 行歌词、长通知卡都能完整显示）
+    ///   · 永远不超出屏幕（留 28% 给任务栏 / 其它窗口）
+    /// 屏幕信息拿不到时回退 620。
+    /// </summary>
+    public static double CardMaxHeight
+    {
+        get
+        {
+            try
+            {
+                double screenH = SystemParameters.WorkArea.Height;   // 逻辑像素
+                if (screenH <= 0) return 820;
+                double sc = Scale <= 0 ? 1.0 : Scale;
+                double usable = screenH * 0.82 / sc;                 // 换算到未缩放坐标
+                return Math.Max(CardHeightFloor, usable);
+            }
+            catch { return 820; }
+        }
+    }
+
+    /// <summary>兼容旧引用：逻辑常量名保留</summary>
+    public const double CardMaxHeightConst = 460;
     public const double CardRadius = 28;
     public const double Gap = 8;
     public const double SphereSize = 36;
