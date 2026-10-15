@@ -167,7 +167,10 @@ public partial class IslandWindow : Window
             _cardNeedsRemeasure = true;
             return;
         }
-        // 有歌词 → 显示分隔线；歌词区高度由内容自适应（MaxHeight 兜底）
+        // 有歌词 → 必须把可见性恢复回来！
+        // 之前"无歌词"分支把它设为 Collapsed，却忘了在这里恢复，
+        // 导致卡片的歌词区一旦隐藏就永久不显示（回归 bug）。
+        if (_cardLyricScroll != null) _cardLyricScroll.Visibility = Visibility.Visible;
         if (_cardLyricSep != null)
         {
             _cardLyricSep.Height = 1;
@@ -2274,10 +2277,16 @@ public partial class IslandWindow : Window
         grid.Children.Add(textCol);
 
         // 波形：Playing 时动画，Paused 时静止
+        // 波形：明确固定宽度，右 Margin 与岛内边距(12)对齐，
+        // 并设 HorizontalAlignment=Right —— 保证永远贴在标题行右端、不出界。
         var wave = new StackPanel
         {
-            Orientation = Orientation.Horizontal, Margin = new Thickness(6, 0, 12, 0),
-            VerticalAlignment = VerticalAlignment.Center
+            Orientation = Orientation.Horizontal,
+            Margin = new Thickness(6, 0, 0, 0),
+            Width = 22,                                  // 4×2.5 + 3×2(间距) ≈ 16，留余量
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Center,
+            ClipToBounds = true                         // 动画放大时不溢出
         };
         for (int i = 0; i < 4; i++)
         {
@@ -2286,7 +2295,7 @@ public partial class IslandWindow : Window
                 Width = 2.5, CornerRadius = new CornerRadius(1.25),
                 Background = AppTheme.Current.Accent,
                 Height = snap.IsPlaying ? 10 : 4,
-                Margin = new Thickness(1, 0, 1, 0),
+                Margin = new Thickness(0.8, 0, 0.8, 0),
                 VerticalAlignment = VerticalAlignment.Center
             };
             if (snap.IsPlaying)
@@ -2483,7 +2492,9 @@ public partial class IslandWindow : Window
     private double MediaPillWidth(Sources.MediaSnapshot snap, string? lyric)
     {
         double icon = 12 + 24 + 8;
-        double wave = 12 + 14;
+        // 波形实际占宽：4 根柱(2.5×4=10) + 3 个间距(2×3=6) + 与标题的间隔(6)，
+        // 再加右内边距 12 → 共 34。之前只留 14，导致波形被挤出胶囊右边界。
+        double wave = 12 + 10 + 6 + 6;
         double titleW = MeasureText(snap.Title, 12.5, true);
         double artistW = string.IsNullOrWhiteSpace(snap.Artist) ? 0 : MeasureText(snap.Artist!, 11) + 7;
         double metaW = titleW + artistW + wave;
