@@ -138,115 +138,79 @@ public partial class IslandWindow : Window
     /// 刷新展开卡的歌词区：当前行 + 前后上下文，当前行高亮加粗。
     /// 只在行索引变化时重建（用签名比对），不做每帧重绘。
     /// </summary>
-        private void RefreshCardLyric(Sources.MediaSnapshot? snap)
+    private void RefreshCardLyric(Sources.MediaSnapshot? snap)
     {
-        var box = _cardLyricBox;
-        if (box == null) { _cardLyricSig = ""; return; }
+        var cur = _cardLyricText;
+        var prev = _cardLyricPrev;
+        var next = _cardLyricNext;
+        var clip = _cardLyricClip;
+        if (cur == null || clip == null) return;
 
-        string? cur = null;
+        // 只有音乐播放器才显示歌词
+        var ctx = new System.Collections.Generic.List<(int Index, string Text, bool IsCurrent)>();
         if (snap != null && _settings.Media.ShowLyrics && Sources.MediaSourcePolicy.IsMusicPlayer(snap.SourceId))
         {
-            int posMs0 = (int)(snap.PositionTicks / TimeSpan.TicksPerMillisecond);
-            cur = _lyrics.CurrentText(posMs0, _lyricOffsetMs);
+            int posMs = (int)(snap.PositionTicks / TimeSpan.TicksPerMillisecond);
+            ctx = _lyrics.GetContextFull(posMs, 1, 1, _lyricOffsetMs, false);
         }
 
-        if (string.IsNullOrEmpty(cur))
+        if (ctx.Count == 0)
         {
             if (_cardLyricSig != "")
             {
                 _cardLyricSig = "";
-                box.Children.Clear();
+                if (prev != null) prev.Text = "";
+                if (next != null) next.Text = "";
+                cur.Text = "";
             }
-            // 无歌词 → 分隔线收起、歌词区可见性收起（内容为空）
-            if (_cardLyricSep != null)
-            {
-                _cardLyricSep.Height = 0;
-                _cardLyricSep.Margin = new Thickness(0);
-            }
-            if (_cardLyricScroll != null) _cardLyricScroll.Visibility = Visibility.Collapsed;
-            _cardNeedsRemeasure = true;
+            clip.Visibility = Visibility.Collapsed;
             return;
         }
-        // 有歌词 → 必须把可见性恢复回来！
-        // 之前"无歌词"分支把它设为 Collapsed，却忘了在这里恢复，
-        // 导致卡片的歌词区一旦隐藏就永久不显示（回归 bug）。
-        if (_cardLyricScroll != null) _cardLyricScroll.Visibility = Visibility.Visible;
-        if (_cardLyricSep != null)
-        {
-            _cardLyricSep.Height = 1;
-            _cardLyricSep.Margin = new Thickness(0, 12, 0, 8);
-        }
+        clip.Visibility = Visibility.Visible;
 
-        int posMs = (int)(snap!.PositionTicks / TimeSpan.TicksPerMillisecond);
-        bool showSub = _settings.Media.ShowLyricTranslation;
-        var ctx = _lyrics.GetContextFull(posMs, 3, 3, _lyricOffsetMs, showSub);   // 当前行 + 上下各 3 行 = 7 行
         var sig = string.Join("|", ctx.Select(c => c.Index + ":" + c.Text));
-        // 【坑】ctx 为空时 sig 也是空串，而 _cardLyricSig 初值同为空串，
-        // 两空相等会直接 return → 歌词永远不被填充（表现为"展开卡没歌词"）。
-        // 因此空上下文必须继续往下走（会走到末尾把 box 清空），不能在此提前返回。
-        if (sig.Length > 0 && sig == _cardLyricSig) return;   // 行未变才跳过
+        if (sig.Length > 0 && sig == _cardLyricSig) return;   // 行未变，不重建
         _cardLyricSig = sig;
 
-        var t = AppTheme.Current;
-        box.Children.Clear();
-        double curTop = 0, curH = 0, offset = 0;
-        // 样式对齐原型（docs/design-lyrics-0.0.1.md §6）：
-        // 居中排列，当前行加粗高亮、上下文行淡化，共 3~5 行
+        // 三行：上一行（淡化）/ 当前行（高亮）/ 下一行（淡化）
+        string curText = "", prevText = "", nextText = "";
         foreach (var item in ctx)
         {
-            var tb = new TextBlock
-            {
-                Text = item.Text,
-                FontSize = item.IsCurrent ? 13.5 : 12,
-                FontWeight = item.IsCurrent ? FontWeights.SemiBold : FontWeights.Normal,
-                Foreground = item.IsCurrent ? t.TextPrimary : t.TextTertiary,
-                TextAlignment = TextAlignment.Center,
-                TextTrimming = TextTrimming.CharacterEllipsis,
-                HorizontalAlignment = HorizontalAlignment.Stretch,
-                Margin = new Thickness(0, item.IsCurrent ? 3 : 2, 0, item.IsCurrent ? 3 : 2),
-                Opacity = item.IsCurrent ? 1.0 : 0.55
-            };
-            box.Children.Add(tb);
-            double h = (item.IsCurrent ? 13.5 : 12) * 1.9 + (item.IsCurrent ? 6 : 4);
-            if (item.IsCurrent) { curTop = offset; curH = h; }
-            offset += h;
+            if (item.IsCurrent) curText = item.Text;
+            else if (prevText.Length == 0 && curText.Length == 0) prevText = item.Text;   // 当前行之前
+            else nextText = item.Text;                                                    // 当前行之后
         }
+        if (curText.Length == 0) curText = ctx[0].Text;   // 兜底
 
-        // 【自适应高度】按内容实际高度设置歌词区高度：
-        //   内容矮 → 卡片跟着矮（不留空白）；内容高 → 到上限后在区内滚动。
-        if (_cardLyricScroll != null)
+        if (prev != null) { prev.Text = prevText; prev.Visibility = prevText.Length > 0 ? Visibility.Visible : Visibility.Collapsed; }
+        cur.Text = curText;
+        if (next != null) { next.Text = nextText; next.Visibility = nextText.Length > 0 ? Visibility.Visible : Visibility.Collapsed; }
+
+        // 当前行超宽时水平滚动（单向一轮，停留-滚动-停留）
+        cur.RenderTransform = Transform.Identity;
+        if (!_settings.Media.LyricAutoScroll) return;
+        double avail = clip.ActualWidth;
+        if (avail <= 0) return;
+        double need = MeasureText(curText, 13.5, true);
+        if (need <= avail - 1) return;
+        double shift = need - avail + 8;
+        double sec = Math.Clamp(shift / 35.0, 2.0, 8.0);
+        var tx = new TranslateTransform();
+        cur.RenderTransform = tx;
+        var anim = new System.Windows.Media.Animation.DoubleAnimationUsingKeyFrames
         {
-            double contentH = 0;
-            foreach (var ch in box.Children)
-                if (ch is FrameworkElement fec)
-                {
-                    double w = box.ActualWidth > 0 ? box.ActualWidth : 360;
-                    fec.Measure(new Size(Math.Max(1, w), double.PositiveInfinity));
-                    contentH += fec.DesiredSize.Height + fec.Margin.Top + fec.Margin.Bottom;
-                }
-            if (contentH > 0)
-                _cardLyricScroll.Height = Math.Min(contentH, s_cardLyricMaxHeight);
-        }
-
-        // 把当前行滚动到可视区中间，避免当前行落在滚动区外
-        var sv = _cardLyricScroll;
-        // 用户手动滚动后 4 秒内不自动跟随，避免"上滚立刻被拉回"
-        if (sv != null && DateTime.Now - _lyricUserScrollAt > TimeSpan.FromSeconds(4))
-        {
-            try
-            {
-                sv.UpdateLayout();
-                double viewH = sv.ViewportHeight > 0 ? sv.ViewportHeight : s_cardLyricMaxHeight;
-                double target = curTop - Math.Max(0, (viewH - curH) / 2.0);
-                sv.ScrollToVerticalOffset(Math.Max(0, target));
-            }
-            catch { /* 布局未就绪时忽略 */ }
-        }
-
-        // 【关键】歌词是异步晚到的：卡片构建时歌词区可能还是空的（高度≈0），
-        // 此时实测的卡片高度不含歌词 → 歌词出现后会被裁掉。
-        // 因此每次重建歌词行（内容高度变化）都标记"需要重新实测卡片高度"。
-        _cardNeedsRemeasure = true;
+            Duration = TimeSpan.FromSeconds(sec + 2.4),
+            RepeatBehavior = System.Windows.Media.Animation.RepeatBehavior.Forever
+        };
+        anim.KeyFrames.Add(new System.Windows.Media.Animation.LinearDoubleKeyFrame(0,
+            System.Windows.Media.Animation.KeyTime.FromPercent(0)));
+        anim.KeyFrames.Add(new System.Windows.Media.Animation.LinearDoubleKeyFrame(0,
+            System.Windows.Media.Animation.KeyTime.FromPercent(0.12)));
+        anim.KeyFrames.Add(new System.Windows.Media.Animation.LinearDoubleKeyFrame(-shift,
+            System.Windows.Media.Animation.KeyTime.FromPercent(0.88)));
+        anim.KeyFrames.Add(new System.Windows.Media.Animation.LinearDoubleKeyFrame(-shift,
+            System.Windows.Media.Animation.KeyTime.FromPercent(1.0)));
+        tx.BeginAnimation(TranslateTransform.XProperty, anim);
     }
 
 
@@ -620,16 +584,21 @@ public partial class IslandWindow : Window
     private int _lyricOffsetMs = 0;                 // 用户微调的歌词偏移（毫秒）
 
     /// <summary>展开卡歌词容器与其滚动宿主</summary>
-    private StackPanel? _cardLyricBox;
-    private ScrollViewer? _cardLyricScroll;
-    private Border? _cardLyricSep;
     /// <summary>用户上次手动滚动歌词的时间（4 秒内不自动跟随，避免上滚被拉回）</summary>
     private DateTime _lyricUserScrollAt = DateTime.MinValue;
     /// <summary>卡片内容滚动宿主（超出高度上限时滚动而非裁切）</summary>
     private ScrollViewer? _cardScrollHost;
     /// <summary>歌词内容变化后需重新实测卡片高度（歌词异步晚到）</summary>
     private bool _cardNeedsRemeasure;
+    /// <summary>展开卡：标题右侧的歌词控件（含横向滚动）</summary>
+    private TextBlock? _cardLyricText;
+    private TextBlock? _cardLyricPrev;
+    private TextBlock? _cardLyricNext;
+    private StackPanel? _cardLyricPanel;
+    private Grid? _cardLyricClip;
     private string _cardLyricSig = "";
+    /// <summary>卡片展开时刻（用于关闭按钮防误触）</summary>
+    private DateTime _cardExpandedAt = DateTime.MinValue;
 
     private Core.Settings _settings = Core.Settings.Load();
 
@@ -1046,9 +1015,10 @@ public partial class IslandWindow : Window
     private FrameworkElement? BuildCard(IslandEvent ev)
     {
         _cardParts = null;                 // 旧引用作废，避免更新已移除的元素
-        _cardLyricBox = null;              // 歌词区引用同理作废（卡片会被重建）
-        _cardLyricScroll = null;
-        _cardLyricSep = null;
+        _cardLyricSig = "";
+        _cardLyricText = null;             // 歌词引用作废（卡片会被重建）
+        _cardLyricPanel = null;
+        _cardLyricClip = null;
         _cardScrollHost = null;
         _cardLyricSig = "";
         var body = ev.Kind switch
@@ -1277,8 +1247,13 @@ public partial class IslandWindow : Window
         var root = new StackPanel { Margin = new Thickness(16, 14, 16, 14) };
         _cardParts = new MediaCardParts();
 
-        // 顶部：大封面 + 元信息
-        var top = new StackPanel { Orientation = Orientation.Horizontal };
+        // 顶部：封面 + 左侧元信息 + 右侧歌词（借用标题右侧空白区，不占额外高度）
+        // 布局： [封面] 标题/作者/来源  |  当前行歌词（超出则自动滚动）
+        var top = new Grid();
+        top.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });   // 封面
+        top.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });   // 标题列
+        top.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) }); // 歌词列
+
         var coverHost = new Grid { Width = 56, Height = 56, Margin = new Thickness(0, 0, 12, 0) };
         var ic = Native.AppIconExtractor.GetIcon(snap.SourceId);
         if (ic != null)
@@ -1290,6 +1265,7 @@ public partial class IslandWindow : Window
         else
             coverHost.Children.Add(new Border
             { Width = 56, Height = 56, CornerRadius = new CornerRadius(12), Background = t.AccentGradient });
+        Grid.SetColumn(coverHost, 0);
         top.Children.Add(coverHost);
 
         var meta = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
@@ -1303,7 +1279,52 @@ public partial class IslandWindow : Window
             { Text = snap.Artist, FontSize = 12, Foreground = t.TextSecondary, Margin = new Thickness(0, 2, 0, 0) });
         meta.Children.Add(new TextBlock
         { Text = snap.SourceName, FontSize = 11, Foreground = t.TextTertiary, Margin = new Thickness(0, 2, 0, 0) });
+        Grid.SetColumn(meta, 1);
         top.Children.Add(meta);
+
+        // ---- 歌词列（标题右侧，显示 2~3 行，当前行高亮）----
+        // 利用标题右侧原本的空白，不增加卡片高度，因此永远不会被裁。
+        // 超出宽度时：先按行截断（TextTrimming），必要时整行水平滚动。
+        var lyWrap = new Grid
+        {
+            Margin = new Thickness(24, 0, 4, 0),        // 与标题拉开距离（之前太靠左）
+            VerticalAlignment = VerticalAlignment.Center,
+            MinWidth = 210                              // 更宽的歌词区
+        };
+        lyWrap.ClipToBounds = true;
+        var lyStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+        // 当前行（高亮）
+        var lyCur = new TextBlock
+        {
+            FontSize = 13.5, FontWeight = FontWeights.SemiBold, Foreground = t.TextPrimary,
+            TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.CharacterEllipsis,
+            HorizontalAlignment = HorizontalAlignment.Left
+        };
+        // 上下文行（淡化）
+        var lyNext = new TextBlock
+        {
+            FontSize = 11.5, Foreground = t.TextTertiary, Margin = new Thickness(0, 2, 0, 0),
+            TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.CharacterEllipsis,
+            HorizontalAlignment = HorizontalAlignment.Left
+        };
+        var lyPrev = new TextBlock
+        {
+            FontSize = 11.5, Foreground = t.TextTertiary, Margin = new Thickness(0, 0, 0, 2),
+            TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.CharacterEllipsis,
+            HorizontalAlignment = HorizontalAlignment.Left
+        };
+        lyStack.Children.Add(lyPrev);
+        lyStack.Children.Add(lyCur);
+        lyStack.Children.Add(lyNext);
+        lyWrap.Children.Add(lyStack);
+        _cardLyricPrev = lyPrev;
+        _cardLyricText = lyCur;
+        _cardLyricNext = lyNext;
+        _cardLyricPanel = lyStack;
+        _cardLyricClip = lyWrap;
+        Grid.SetColumn(lyWrap, 2);
+        top.Children.Add(lyWrap);
+
         root.Children.Add(top);
 
         // 进度条：支持拖动 seek。
@@ -1393,59 +1414,6 @@ public partial class IslandWindow : Window
         ctl.Children.Add(MakeIconControlButton("next", () => _media?.NextAsync(sid), t, 34));
         root.Children.Add(ctl);
 
-        // ---- 歌词区（放在控制按钮【下面】）----
-        // 【关键】容器必须"无条件创建"：卡片构建时歌词往往还没查回来（网络 2~15s），
-        // 若此处用 if 判断，晚到的歌词就永远不会显示 —— 这正是"展开卡没歌词"的原因。
-        // 可见性交给每帧的 RefreshCardLyric 决定。
-        // 高度自适应但有上限（MaxHeight + 滚动条），不会被歌词无限撑高。
-        // 【关键】分隔线初始 Visible：MeasureCardContent 在构建时实测卡片高度，
-        // 若此处 Collapsed（高度 0），实测值就不含歌词区，卡片高度偏小 → 歌词被裁掉。
-        var lySep = new Border
-        {
-            Height = 0, Background = t.Stroke, Opacity = 0.5,
-            Margin = new Thickness(0, 0, 0, 0),    // 歌词到位后设为 1 / (0,12,0,8)
-            Visibility = Visibility.Visible
-        };
-        _cardLyricSep = lySep;
-        root.Children.Add(lySep);
-
-        var lyInner = new StackPanel();
-        _cardLyricBox = lyInner;
-
-        // 【关键】用固定 Height 而不是 MaxHeight：
-        // ScrollViewer 的期望高度需要完整布局过程才能算出，
-        // 在 MeasureCardContent 的离屏 Measure 里算不出来（实测始终为 0），
-        // 导致卡片高度不含歌词区、歌词被裁。固定高度可被可靠测量。
-        // 【关键】Height 初值 0（无歌词），歌词到位后由 RefreshCardLyric 设为 96。
-        // 不能用 Visibility.Collapsed 控制：Collapsed 元素高度恒为 0，
-        // MeasureCardContent 在离屏测量时就测不到歌词高度，卡片定高偏小 → 歌词被裁。
-        var lyScroll = new ScrollViewer
-        {
-            Content = lyInner,
-            // 默认隐藏滚动条（不占宽、不抢眼），鼠标进入才显示胶囊细条
-            VerticalScrollBarVisibility = ScrollBarVisibility.Hidden,
-            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-            // 高度自适应：无歌词时 0，有歌词时随内容生长，超过 MaxHeight 才出现滚动
-            MaxHeight = s_cardLyricMaxHeight,
-            VerticalAlignment = VerticalAlignment.Top,
-            Padding = new Thickness(0, 0, 6, 0),
-            Visibility = Visibility.Visible
-        };
-        lyScroll.MouseEnter += (_, _) =>
-        {
-            lyScroll.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
-            ApplyThinScrollBar(lyScroll);
-        };
-        lyScroll.MouseLeave += (_, _) =>
-        {
-            lyScroll.VerticalScrollBarVisibility = ScrollBarVisibility.Hidden;
-            _lyricUserScrollAt = DateTime.MinValue;   // 离开后恢复自动跟随
-        };
-        // 用户手动滚动 → 暂停自动跟随 4 秒（否则下一句歌词立刻把位置拉回，
-        // 表现为"滚轮只能下滚、上滚没反应"）
-        lyScroll.PreviewMouseWheel += (_, _) => _lyricUserScrollAt = DateTime.Now;
-        _cardLyricScroll = lyScroll;
-        root.Children.Add(lyScroll);
         _cardParts!.PlayGlyphHost = playBtn.Child as Border;
         _cardParts.PlayGlyphName = snap.IsPlaying ? "pause" : "play";
         return root;
@@ -2307,16 +2275,13 @@ public partial class IslandWindow : Window
             }
             wave.Children.Add(bar);
         }
-        // 【波形位置】标题行的最右端、垂直居中（"居中靠右"）：
-        //   标题 作者              ▁▃▁▃
-        //   歌词歌词歌词
-        // 不占独立行，也不与歌词同排 —— 与标题/作者同一条基线。
-        wave.HorizontalAlignment = HorizontalAlignment.Right;
+        // 【波形位置】放在胶囊【右侧、整体垂直居中】。
+        // 用 Grid 叠一层：波形独立于文字列，按整个胶囊高度居中，
+        // 不受标题行高度影响（之前放在 metaRow 里，行矮就显得贴顶）。
+        Grid.SetColumn(wave, 2);            // 岛的第 3 列（右端）
         wave.VerticalAlignment = VerticalAlignment.Center;
-        wave.Margin = new Thickness(6, 0, 0, 0);
-        var metaRowRef = FindChild<Grid>(textCol);
-        if (metaRowRef != null) metaRowRef.Children.Add(wave);
-        Grid.SetColumn(wave, 3);            // 第 3 列 = 标题行最右侧
+        wave.HorizontalAlignment = HorizontalAlignment.Right;
+        grid.Children.Add(wave);
         return grid;
     }
 
@@ -3198,6 +3163,7 @@ public partial class IslandWindow : Window
             if (_stack.IsExpanded) return;
 
             _expandedByClick = false;                   // 标记为"悬浮展开"
+            _cardExpandedAt = DateTime.Now;             // 记录展开时刻（防误触）
             _stack.SetExpanded(true);
             _lastLayoutSignature = null;
             ApplyLayout(force: true);
@@ -3217,6 +3183,10 @@ public partial class IslandWindow : Window
     private void CloseExpandedCard()
     {
         if (!_stack.IsExpanded) return;
+        // 【防误触】展开瞬间，卡片右上角的关闭按钮可能正好"长"到鼠标下方，
+        // 导致刚展开就被点掉（日志表现为"展开"与"点击关闭"同一秒发生）。
+        // 展开后 500ms 内的关闭点击一律忽略。
+        if (DateTime.Now - _cardExpandedAt < TimeSpan.FromMilliseconds(500)) return;
         _hoverExpandSuppressed = true;      // 同一岛上不再自动弹
         _hoverExpandTimer?.Stop();
         _hoverExpandId = null;
