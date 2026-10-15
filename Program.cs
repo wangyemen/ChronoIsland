@@ -20,6 +20,12 @@ public static class Program
             MediaDiag.Run().GetAwaiter().GetResult();
             return;
         }
+        if (args.Length > 0 && args[0] == "lyrics")
+        {
+            if (args.Length > 2) LyricsDiag.RunOne(args[1], args[2]);
+            else LyricsDiag.Run();
+            return;
+        }
         if (args.Length > 0 && args[0] == "hittest")
         {
             HitTestDiag.Run();

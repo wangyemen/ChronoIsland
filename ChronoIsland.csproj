@@ -20,6 +20,7 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.174" PrivateAssets="all" />
+    <PackageReference Include="Lyricify.Lyrics.Helper" Version="0.2.0" />
   </ItemGroup>
   <ItemGroup>
     <!-- 图标资源：assets\icon.ico 由用户放置，缺失时回退内置矢量图标 -->

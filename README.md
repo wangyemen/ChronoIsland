@@ -8,6 +8,7 @@ Windows 桌面灵动岛。默认**屏幕上什么都没有**——来通知、�
 | 路径 | 说明 |
 | --- | --- |
 | <docs/design-0.0.1.md> | 设计文档（唯一约定源：视觉 / 动效 / 状态机 / 模块 / 架构） |
+| <docs/design-lyrics-0.0.1.md> | 歌词功能设计文档（来源轮转 / 胶囊两行布局 / 宽度自适应与自动滚动） |
 | <designWeb/> | **网站发布目录**：index.html（首页）+ styles.html（状态图库）+ demo.html（交互体验），浏览器直接打开 |
 | <样式.html> | 状态图库源文件（旧位置，内容已同步到 <designWeb/styles.html>） |
 | <体验.html> | 集群式堆叠体验页源文件（旧位置，内容已同步到 <designWeb/demo.html>） |

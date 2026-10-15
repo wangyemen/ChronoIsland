@@ -118,6 +118,16 @@ public sealed class MediaSettings
     public int PausedHideSeconds { get; set; } = 5;
     /// <summary>是否只在播放时显示（暂停立即收起）</summary>
     public bool HideWhenPaused { get; set; }
+
+    // ---- 歌词（docs/design-lyrics-0.0.1.md）----
+    /// <summary>是否在胶囊态显示歌词（开启后胶囊会增高一行）</summary>
+    public bool ShowLyrics { get; set; }
+    /// <summary>歌词时间轴偏移（毫秒），LRC 常有数百毫秒偏差，供用户微调</summary>
+    public int LyricOffsetMs { get; set; }
+    /// <summary>歌词放不下时是否自动滚动（关闭则直接截断）</summary>
+    public bool LyricAutoScroll { get; set; } = true;
+    /// <summary>是否显示翻译行（歌词副行）</summary>
+    public bool ShowLyricTranslation { get; set; }
 }
 
 public sealed class GameSettings

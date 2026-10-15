@@ -350,6 +350,13 @@ public partial class IslandWindow : Window
             var ev = _startupQueue[bestIdx];
             _startupQueue.RemoveAt(bestIdx);
             App.LogInfo("Island", $"启动入场：{ev.Kind}/{ev.SourceKey}（剩 {_startupQueue.Count} 条）");
+            // 媒体：入栈时同步曲目给歌词源
+            if (ev.Kind == "media" && ev.Payload is Sources.MediaSnapshot ms0)
+            {
+                int d0 = (int)(Math.Max(0, ms0.EndTicks) / TimeSpan.TicksPerMillisecond);
+                _lyrics.UpdateTrack(ms0.Title, ms0.Artist, ms0.Album, d0);
+            }
+
             AdmitIsland(ev);
         }
         finally { _startupDraining = false; }
@@ -480,11 +487,24 @@ public partial class IslandWindow : Window
         catch (Exception ex) { App.Log("Island", ex); }
     }
 
+    /// <summary>胶囊内歌词控件引用（用于每帧更新文本 / 滚动）</summary>
+    private TextBlock? _pillLyricText;
+    private Grid? _pillLyricRow;
+    private FrameworkElement? _pillLyricHost;
+    private string _lastLyricText = "";
+    private double _lyricScrollShift;      // 需要滚动时的位移
+    private bool _lyricNeedScroll;
+
+    /// <summary>歌词源（跟随当前媒体曲目）</summary>
+    private readonly Sources.LyricsSource _lyrics = new();
+    private int _lyricOffsetMs = 0;          // 用户微调的歌词偏移（毫秒）
+
     private Core.Settings _settings = Core.Settings.Load();
 
     /// <summary>设置变化时重新应用几何（顶端距离 / 宽度上限 / 缩放）</summary>
     public void ApplyGeometrySettings(Core.Settings s)
     {
+        _lyricOffsetMs = s.Media.LyricOffsetMs;
         IslandMetrics.Apply(s);
         foreach (var item in _stack.Items)
             item.MeasuredWidth = MeasurePillWidth(item.Event);
@@ -691,6 +711,13 @@ public partial class IslandWindow : Window
     {
         if (item.IsDying) return;
         item.ReplaceEvent(ev);
+
+        // 媒体：把当前曲目同步给歌词源（内部做了同名去重，不会重复请求）
+        if (ev.Kind == "media" && ev.Payload is Sources.MediaSnapshot ms)
+        {
+            int durMs = (int)(Math.Max(0, ms.EndTicks) / TimeSpan.TicksPerMillisecond);
+            _lyrics.UpdateTrack(ms.Title, ms.Artist, ms.Album, durMs);
+        }
 
         // 【关键】按当前形态重建：展开态必须继续用卡片模板，
         // 否则暂停事件会把进度条/控制按钮打回胶囊（表现为"暂停后按钮消失"）
@@ -1948,23 +1975,66 @@ public partial class IslandWindow : Window
         Grid.SetColumn(coverHost, 0);
         grid.Children.Add(coverHost);
 
-        var text = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+        // ---------- 右侧文字列：上行（标题+作者+波形） / 下行（歌词）----------
+        // 布局：图标左固定不动，歌词与歌名作者统一排在图标右侧
+        var textCol = new StackPanel
+        {
+            Orientation = Orientation.Vertical,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 0, 0)
+        };
+
+        // 上行：标题 + 作者（横向）+ 波形推到最右
+        var metaRow = new Grid();
+        metaRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        metaRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        metaRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        metaRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
         var title = new TextBlock
         {
-            Text = snap.Title, FontSize = 13, FontWeight = FontWeights.SemiBold,
+            Text = snap.Title, FontSize = 12.5, FontWeight = FontWeights.SemiBold,
             Foreground = AppTheme.Current.TextPrimary,
-            TextTrimming = TextTrimming.CharacterEllipsis
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            VerticalAlignment = VerticalAlignment.Center
         };
-        var artist = new TextBlock
+        Grid.SetColumn(title, 0);
+        metaRow.Children.Add(title);
+
+        if (!string.IsNullOrWhiteSpace(snap.Artist))
         {
-            Text = snap.Artist, FontSize = 11.5, Margin = new Thickness(6, 0, 0, 0),
-            Foreground = AppTheme.Current.TextSecondary,
-            TextTrimming = TextTrimming.CharacterEllipsis
+            var artist = new TextBlock
+            {
+                Text = snap.Artist, FontSize = 11, Margin = new Thickness(7, 0, 0, 0),
+                Foreground = AppTheme.Current.TextSecondary,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            Grid.SetColumn(artist, 1);
+            metaRow.Children.Add(artist);
+        }
+        // 波形：放在 metaRow 第 3 列（右端），由 BuildMediaPill 尾部统一添加
+        textCol.Children.Add(metaRow);
+
+        // 下行：歌词（有歌词时才显示；宽度自适应 / 超宽滚动在 ApplyLyric 中处理）
+        var lyricRow = new Grid { Height = 15, Margin = new Thickness(0, 1, 0, 0) };
+        var lyricText = new TextBlock
+        {
+            FontSize = 11, Foreground = AppTheme.Current.TextSecondary,
+            TextTrimming = TextTrimming.None, TextWrapping = TextWrapping.NoWrap,
+            VerticalAlignment = VerticalAlignment.Center,
+            RenderTransformOrigin = new System.Windows.Point(0, 0.5)
         };
-        text.Children.Add(title);
-        if (!string.IsNullOrWhiteSpace(snap.Artist)) text.Children.Add(artist);
-        Grid.SetColumn(text, 1);
-        grid.Children.Add(text);
+        lyricRow.Children.Add(lyricText);
+        lyricRow.ClipToBounds = true;
+        textCol.Children.Add(lyricRow);
+
+        _pillLyricText = lyricText;
+        _pillLyricRow = lyricRow;
+        _pillLyricHost = textCol;
+
+        Grid.SetColumn(textCol, 1);
+        grid.Children.Add(textCol);
 
         // 波形：Playing 时动画，Paused 时静止
         var wave = new StackPanel
@@ -1991,9 +2061,31 @@ public partial class IslandWindow : Window
             }
             wave.Children.Add(bar);
         }
-        Grid.SetColumn(wave, 2);
-        grid.Children.Add(wave);
+        // 波形放进 metaRow（第 3 列，右端），不再单独占岛的第 3 列
+        Grid.SetColumn(wave, 3);
+        var metaRowRef = FindChild<Grid>(textCol);
+        if (metaRowRef != null) metaRowRef.Children.Add(wave);
         return grid;
+    }
+
+    /// <summary>
+    /// 用 FormattedText 精确测量文本宽度（歌词需要真实宽度做三段式自适应，
+    /// 字数估算会导致歌词被裁或留白不准）。
+    /// </summary>
+    private static double MeasureText(string text, double fontSize, bool bold = false)
+    {
+        if (string.IsNullOrEmpty(text)) return 0;
+        try
+        {
+            var ft = new FormattedText(
+                text, System.Globalization.CultureInfo.CurrentCulture,
+                System.Windows.FlowDirection.LeftToRight,
+                new Typeface(new FontFamily("Segoe UI"), FontStyles.Normal,
+                             bold ? FontWeights.SemiBold : FontWeights.Normal, FontStretches.Normal),
+                fontSize, Brushes.White, VisualTreeHelper.GetDpi(Application.Current.MainWindow).PixelsPerDip);
+            return ft.Width;
+        }
+        catch { return text.Length * fontSize * 0.55; }
     }
 
     private double MeasurePillWidth(IslandEvent ev)
@@ -2006,9 +2098,21 @@ public partial class IslandWindow : Window
             return Math.Clamp(22 + 20 + ev.Title.Length * 7.2 + 8 + ev.Subtitle!.Length * 6.0 + 24,
                 IslandMetrics.MinWidth, IslandMetrics.MaxWidth);
         if (ev.Kind == "media")
+        {
+            // 媒体胶囊宽度：精确测量（标题+作者+波形）与（歌词）取较大者，
+            // 实现三段式第②步"歌词放不下时先把岛加宽"
+            var snap = ev.Payload as Sources.MediaSnapshot;
+            string? lyric = null;
+            if (snap != null && _settings.Media.ShowLyrics)
+            {
+                int posMs = (int)(snap.PositionTicks / TimeSpan.TicksPerMillisecond);
+                lyric = _lyrics.CurrentText(posMs, _lyricOffsetMs);
+            }
+            if (snap != null) return MediaPillWidth(snap, lyric);
             return Math.Clamp(56 + ev.Title.Length * 7.2 +
                 (string.IsNullOrEmpty(ev.Subtitle) ? 0 : ev.Subtitle.Length * 6.0 + 8),
                 IslandMetrics.MinWidth, IslandMetrics.MaxWidth);
+        }
 
         // 0.0.1 用字数估算；后续用 FormattedText 精确测量
         double w = 24;                     // 图标 + 间距
@@ -2042,6 +2146,7 @@ public partial class IslandWindow : Window
         }
         ApplyLayout();
         RefreshMediaCard();          // 进度条 / 时间 / 播放图标 每帧更新
+        UpdatePillLyric(_stack.Active?.Event.Payload as Sources.MediaSnapshot);
 
         // 【自适应中心】cx 必须与 IsPointerOverAnyIsland 的命中坐标系严格一致：
         // 命中测试用 GetWindowRect（物理像素）/ DpiScale 反推逻辑坐标，
