@@ -40,22 +40,7 @@ public partial class IslandWindow : Window
     private Sources.MediaSource? _media;
     private Sources.SysStateSource? _sys;   // 键位 + 会话解锁（docs §5.5）
     private static readonly double s_progressTrackWidth = 388;
-    /// <summary>
-    /// 展开卡的目标高度（未缩放逻辑值）。
-    /// 媒体卡：基础内容高固定 174，再按"是否启用歌词"预留歌词区高度。
-    /// 这样即使歌词异步晚到（2~15s），卡片也已预留空间，不会被裁。
-    /// </summary>
-    private double DesiredCardHeight(IslandEvent ev, Sources.MediaSnapshot? snap)
-    {
-        double baseH = 174;                       // 媒体卡基础高度（实测值）
-        if (ev.Kind == "media" && _settings.Media.ShowLyrics
-            && snap != null && Sources.MediaSourcePolicy.IsMusicPlayer(snap.SourceId))
-        {
-            baseH += 12 + 1 + 8;                  // 分隔线（上下间距 12/8 + 1px 线）
-            baseH += s_cardLyricMaxHeight;        // 歌词区
-        }
-        return baseH;
-    }
+
 
     /// <summary>展开卡歌词区高度（当前行 + 上下各 3 行 = 7 行），超出用滚动条</summary>
     private static readonly double s_cardLyricMaxHeight = 220;
@@ -172,18 +157,17 @@ public partial class IslandWindow : Window
                 _cardLyricSig = "";
                 box.Children.Clear();
             }
-            // 无歌词 → 高度归零（不是 Collapsed），保证测量与显示一致
-            if (_cardLyricScroll != null) _cardLyricScroll.Height = 0;
+            // 无歌词 → 分隔线收起、歌词区可见性收起（内容为空）
             if (_cardLyricSep != null)
             {
                 _cardLyricSep.Height = 0;
                 _cardLyricSep.Margin = new Thickness(0);
             }
+            if (_cardLyricScroll != null) _cardLyricScroll.Visibility = Visibility.Collapsed;
             _cardNeedsRemeasure = true;
             return;
         }
-        // 有歌词 → 撑开歌词区（限高 96px，超出滚动）
-        if (_cardLyricScroll != null) _cardLyricScroll.Height = s_cardLyricMaxHeight;
+        // 有歌词 → 显示分隔线；歌词区高度由内容自适应（MaxHeight 兜底）
         if (_cardLyricSep != null)
         {
             _cardLyricSep.Height = 1;
@@ -223,6 +207,22 @@ public partial class IslandWindow : Window
             double h = (item.IsCurrent ? 13.5 : 12) * 1.9 + (item.IsCurrent ? 6 : 4);
             if (item.IsCurrent) { curTop = offset; curH = h; }
             offset += h;
+        }
+
+        // 【自适应高度】按内容实际高度设置歌词区高度：
+        //   内容矮 → 卡片跟着矮（不留空白）；内容高 → 到上限后在区内滚动。
+        if (_cardLyricScroll != null)
+        {
+            double contentH = 0;
+            foreach (var ch in box.Children)
+                if (ch is FrameworkElement fec)
+                {
+                    double w = box.ActualWidth > 0 ? box.ActualWidth : 360;
+                    fec.Measure(new Size(Math.Max(1, w), double.PositiveInfinity));
+                    contentH += fec.DesiredSize.Height + fec.Margin.Top + fec.Margin.Bottom;
+                }
+            if (contentH > 0)
+                _cardLyricScroll.Height = Math.Min(contentH, s_cardLyricMaxHeight);
         }
 
         // 把当前行滚动到可视区中间，避免当前行落在滚动区外
@@ -1422,7 +1422,9 @@ public partial class IslandWindow : Window
             // 默认隐藏滚动条（不占宽、不抢眼），鼠标进入才显示胶囊细条
             VerticalScrollBarVisibility = ScrollBarVisibility.Hidden,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-            Height = 0,                            // 歌词到位后设为 s_cardLyricMaxHeight
+            // 高度自适应：无歌词时 0，有歌词时随内容生长，超过 MaxHeight 才出现滚动
+            MaxHeight = s_cardLyricMaxHeight,
+            VerticalAlignment = VerticalAlignment.Top,
             Padding = new Thickness(0, 0, 6, 0),
             Visibility = Visibility.Visible
         };
@@ -2296,14 +2298,16 @@ public partial class IslandWindow : Window
             }
             wave.Children.Add(bar);
         }
-        // 【布局】波形放在「标题行」与「歌词行」之间，作为独立一行居中：
-        //   标题 作者
-        //   ▁▃▁▃   ← 波形（这里）
+        // 【波形位置】标题行的最右端、垂直居中（"居中靠右"）：
+        //   标题 作者              ▁▃▁▃
         //   歌词歌词歌词
-        // 之前塞在 metaRow 第 3 列、与歌词挤在同一水平带，观感很乱。
-        wave.HorizontalAlignment = HorizontalAlignment.Left;
-        wave.Margin = new Thickness(0, 2, 0, 2);
-        textCol.Children.Insert(1, wave);   // 0=标题行, 1=波形, 2=歌词行
+        // 不占独立行，也不与歌词同排 —— 与标题/作者同一条基线。
+        wave.HorizontalAlignment = HorizontalAlignment.Right;
+        wave.VerticalAlignment = VerticalAlignment.Center;
+        wave.Margin = new Thickness(6, 0, 0, 0);
+        var metaRowRef = FindChild<Grid>(textCol);
+        if (metaRowRef != null) metaRowRef.Children.Add(wave);
+        Grid.SetColumn(wave, 3);            // 第 3 列 = 标题行最右侧
         return grid;
     }
 
@@ -2716,11 +2720,9 @@ public partial class IslandWindow : Window
                     {
                         double sc2 = IslandMetrics.Scale <= 0 ? 1.0 : IslandMetrics.Scale;
                         double m2 = MeasureCardContent(existing, cwForCard() / sc2);
-                        double need2 = DesiredCardHeight(item.Event, item.Event.Payload as Sources.MediaSnapshot) * sc2;
-                        double tgt2 = Math.Max(m2, need2);
-                        if (tgt2 > 0 && Math.Abs(tgt2 - item.MeasuredCardHeight) > 0.5)
+                        if (m2 > 0 && Math.Abs(m2 - item.MeasuredCardHeight) > 0.5)
                         {
-                            item.MeasuredCardHeight = tgt2;
+                            item.MeasuredCardHeight = m2;
                             _lastLayoutSignature = null;
                         }
                     }
@@ -2730,12 +2732,10 @@ public partial class IslandWindow : Window
                     // 宽度也要按缩放还原：内容是在"放大后的框"里排版的
                     double sc = IslandMetrics.Scale <= 0 ? 1.0 : IslandMetrics.Scale;
                     double measured = MeasureCardContent(c, cwForCard() / sc);
-                    // 与"预留歌词区"的目标取较大者：歌词晚到时卡片也已留好空间
-                    double need = DesiredCardHeight(item.Event, item.Event.Payload as Sources.MediaSnapshot) * sc;
-                    double tgt = Math.Max(measured, need);
-                    if (tgt > 0 && Math.Abs(tgt - item.MeasuredCardHeight) > 0.5)
+                    // 纯自适应：高度 = 内容实测（歌词区用 MaxHeight 自适应，内容少就矮）
+                    if (measured > 0 && Math.Abs(measured - item.MeasuredCardHeight) > 0.5)
                     {
-                        item.MeasuredCardHeight = tgt;
+                        item.MeasuredCardHeight = measured;
                         _lastLayoutSignature = null;   // 强制下一帧重算槽位
                     }
                 }
