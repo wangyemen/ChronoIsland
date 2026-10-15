@@ -1,0 +1,34 @@
+<Window x:Class="ChronoIsland.UI.IslandWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="ChronoIsland"
+        Width="1600" Height="420"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        ShowActivated="False"
+        Focusable="False"
+        Topmost="True"
+        Left="0" Top="0">
+    <!-- 透明·置顶·无边框·不抢焦点·不进任务栏（docs §6） -->
+    <Grid x:Name="Root">
+        <!-- 水珠颈缩粘连线 -->
+        <Path x:Name="NeckPath" Fill="#FF1C1C25" Opacity="0.9" />
+        <!-- 岛集群 -->
+        <Canvas x:Name="Stage" />
+        <!-- +N 溢出指示 -->
+        <Border x:Name="PlusBadge"
+                Width="38" Height="20"
+                CornerRadius="10"
+                BorderBrush="#29FFFFFF" BorderThickness="1"
+                Background="#201C1C25"
+                Visibility="Collapsed"
+                HorizontalAlignment="Left" VerticalAlignment="Top">
+            <TextBlock x:Name="PlusText" Text="+0"
+                       Foreground="#A8ADB7" FontSize="11" FontWeight="SemiBold"
+                       HorizontalAlignment="Center" VerticalAlignment="Center" />
+        </Border>
+    </Grid>
+</Window>

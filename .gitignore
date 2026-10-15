@@ -1,0 +1,29 @@
+# 本地 .NET SDK 与 NuGet 缓存（不入库）
+.tools/
+tools/
+
+# 构建产物
+bin/
+obj/
+
+# 日志与本地数据
+*.log
+
+# ===== 开源发布时排除 =====
+# 构建产物与本地运行时
+publish/
+.dotnet/
+bin/
+obj/
+
+# 网站/设计页面（designWeb 不开源，根目录下的旧副本同理）
+designWeb/
+样式.html
+
+# 本地诊断脚本
+*.ps1
+
+# 用户数据 / 缓存
+*.log
+*.user
+.vs/
