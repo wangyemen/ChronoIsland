@@ -108,8 +108,20 @@ public partial class IslandWindow : Window
         var snap = _media?.GetCurrent(active.Event.AppKey ?? active.Event.SourceKey);
         if (snap == null) return;
 
-        double pct = Math.Clamp(snap.ProgressPercent, 0, 100);
-        parts.ProgressFill.Width = Math.Max(2, parts.TrackWidth * pct / 100.0);
+        // 进度条：直接用「已播放 / 总时长」算比例，比整数百分比更精确
+        // （之前用 int 百分比，末尾可能差 1% 导致进度条差一小截）。
+        // 快结束时（剩余 < 1s）吸附满格，避免观感上"总差一点"。
+        var posTicks = Math.Max(0, snap.PositionTicks);
+        var endTicks = Math.Max(0, snap.EndTicks);
+        double frac;
+        if (endTicks > 0)
+        {
+            frac = posTicks / (double)endTicks;
+            if (endTicks - posTicks < TimeSpan.TicksPerSecond) frac = 1.0;
+        }
+        else frac = Math.Clamp(snap.ProgressPercent / 100.0, 0, 1);
+
+        parts.ProgressFill.Width = Math.Max(2, parts.TrackWidth * Math.Clamp(frac, 0, 1));
 
         var pos = TimeSpan.FromTicks(Math.Max(0, snap.PositionTicks));
         var end = TimeSpan.FromTicks(Math.Max(0, snap.EndTicks));
@@ -599,6 +611,8 @@ public partial class IslandWindow : Window
     private string _cardLyricSig = "";
     /// <summary>卡片展开时刻（用于关闭按钮防误触）</summary>
     private DateTime _cardExpandedAt = DateTime.MinValue;
+    /// <summary>上次校正展开卡高度的时刻（节流用）</summary>
+    private DateTime _lastCardHeightFix = DateTime.MinValue;
 
     private Core.Settings _settings = Core.Settings.Load();
 
@@ -2721,6 +2735,29 @@ public partial class IslandWindow : Window
                     {
                         item.MeasuredCardHeight = measured;
                         _lastLayoutSignature = null;   // 强制下一帧重算槽位
+                    }
+                }
+            }
+
+            // 【展开态卡片高度：每帧校正】
+            // 高度不能只在"内容重建"时测：歌词挪到标题行后内容不再重建，
+            // MeasuredCardHeight 会一直用旧值（偏大），导致按钮下方留一片空白。
+            // 这里对展开卡每帧重测，与实测偏差 > 0.5px 就更新（弹簧平滑过渡）。
+            // 节流：每 250ms 校正一次，避免每帧 Measure 的性能开销
+            bool fixNow = DateTime.Now - _lastCardHeightFix >= TimeSpan.FromMilliseconds(250);
+            if (fixNow) _lastCardHeightFix = DateTime.Now;
+            _lastCardHeightFix = DateTime.Now;
+            if (fixNow && wantCard)
+            {
+                var cur = (b.Child as ContentPresenter)?.Content as FrameworkElement;
+                if (cur != null)
+                {
+                    double sc = IslandMetrics.Scale <= 0 ? 1.0 : IslandMetrics.Scale;
+                    double m = MeasureCardContent(cur, cwForCard() / sc);
+                    if (m > 0 && Math.Abs(m - item.MeasuredCardHeight) > 0.5)
+                    {
+                        item.MeasuredCardHeight = m;
+                        _lastLayoutSignature = null;
                     }
                 }
             }

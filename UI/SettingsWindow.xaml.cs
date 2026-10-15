@@ -742,7 +742,7 @@ public partial class SettingsWindow : Window
                 _settings.Island.MaxWidth = v;
                 LivePreviewGeometry();
             }),
-            SliderRow("整体缩放", _settings.Island.Scale, 0.7, 1.5, "×", v =>
+            SliderRow("整体缩放", _settings.Island.Scale, 0.5, 3.0, "×", v =>
             {
                 _settings.Island.Scale = Math.Round(v, 2);
                 LivePreviewGeometry();

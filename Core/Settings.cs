@@ -55,7 +55,8 @@ public sealed class IslandSettings
 {
     public double Top { get; set; } = 8;
     public double MaxWidth { get; set; } = 420;
-    public double Scale { get; set; } = 1.0;
+    /// <summary>整体缩放（默认 1.5×，可在 0.5× ~ 3× 间调整）</summary>
+    public double Scale { get; set; } = 1.5;
 
     /// <summary>
     /// 悬停放行时间（毫秒）。

@@ -183,10 +183,20 @@ public sealed class MediaSource : IEventSource
                     position = timeline.EndTime;
             }
 
-            int progress = 0;
+            // 【时间轴语义】统一为"相对量"：
+            //   PositionTicks = 已播放时长（扣掉 StartTime 偏移）
+            //   EndTicks      = 总时长（EndTime - StartTime）
+            // 这样 UI 端 rem = EndTicks - PositionTicks 才是正确的剩余时间。
+            // 之前直接存 timeline.Position（绝对量）与 total，StartTime > 0 时
+            // 会出现"剩余为负、进度条不满"，表现为快结束时进度条差一截。
             var total = timeline.EndTime - timeline.StartTime;
+            var relPos = position - timeline.StartTime;
+            if (relPos < TimeSpan.Zero) relPos = TimeSpan.Zero;
+            if (total > TimeSpan.Zero && relPos > total) relPos = total;
+
+            int progress = 0;
             if (total > TimeSpan.Zero)
-                progress = (int)Math.Clamp((position - timeline.StartTime).TotalMilliseconds / total.TotalMilliseconds * 100, 0, 100);
+                progress = (int)Math.Clamp(relPos.TotalMilliseconds / total.TotalMilliseconds * 100, 0, 100);
 
             result.Add(new MediaSnapshot(
                 SourceId: sourceId,
@@ -196,7 +206,7 @@ public sealed class MediaSource : IEventSource
                 Album: properties.AlbumTitle ?? "",
                 IsPlaying: status == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing,
                 ProgressPercent: progress,
-                PositionTicks: position.Ticks,
+                PositionTicks: relPos.Ticks,
                 EndTicks: total.Ticks));
         }
         return result;
