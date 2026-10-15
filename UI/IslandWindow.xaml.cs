@@ -111,8 +111,21 @@ public partial class IslandWindow : Window
         // 进度条：直接用「已播放 / 总时长」算比例，比整数百分比更精确
         // （之前用 int 百分比，末尾可能差 1% 导致进度条差一小截）。
         // 快结束时（剩余 < 1s）吸附满格，避免观感上"总差一点"。
+        // 【二次外推】GSMTC 的 Position 每 3~4 秒才推一次，快照因此是"陈旧"的。
+        // 用快照采样时刻 SampledAtUtcTicks 补上到此刻流逝的时间，
+        // 进度条与歌词才能连续推进，而不是每次跳一大格。
         var posTicks = Math.Max(0, snap.PositionTicks);
         var endTicks = Math.Max(0, snap.EndTicks);
+        if (snap.IsPlaying && snap.SampledAtUtcTicks > 0)
+        {
+            var sinceSampled = DateTime.UtcNow.Ticks - snap.SampledAtUtcTicks;
+            // 上限 10s：防止系统休眠/长时间挂起后突然跳到结尾
+            if (sinceSampled > 0 && sinceSampled < TimeSpan.TicksPerSecond * 10)
+            {
+                posTicks += sinceSampled;
+                if (endTicks > 0 && posTicks > endTicks) posTicks = endTicks;
+            }
+        }
         double frac;
         if (endTicks > 0)
         {
@@ -162,7 +175,7 @@ public partial class IslandWindow : Window
         var ctx = new System.Collections.Generic.List<(int Index, string Text, bool IsCurrent)>();
         if (snap != null && _settings.Media.ShowLyrics && Sources.MediaSourcePolicy.IsMusicPlayer(snap.SourceId))
         {
-            int posMs = (int)(snap.PositionTicks / TimeSpan.TicksPerMillisecond);
+            int posMs = (int)CurrentPositionMs(snap);
             ctx = _lyrics.GetContextFull(posMs, 1, 1, _lyricOffsetMs, false);
         }
 
@@ -956,6 +969,28 @@ public partial class IslandWindow : Window
     /// 只把关闭按钮按同样的 inset 摆到右上角。
     /// </summary>
     /// <summary>展开卡的可用内容宽度（去掉圆角裁切影响，按 CardWidth 计）</summary>
+    /// <summary>
+    /// 取媒体的"当前播放位置（毫秒）"，对 GSMTC 的陈旧快照做二次外推。
+    /// GSMTC 的 Position 每 3~4 秒才推一次；歌词与进度条都依赖它，
+    /// 不外推就会卡在固定的一行 / 进度条不涨。
+    /// </summary>
+    private static long CurrentPositionMs(Sources.MediaSnapshot? snap)
+    {
+        if (snap == null) return 0;
+        long pos = Math.Max(0, snap.PositionTicks);
+        long end = Math.Max(0, snap.EndTicks);
+        if (snap.IsPlaying && snap.SampledAtUtcTicks > 0)
+        {
+            long since = DateTime.UtcNow.Ticks - snap.SampledAtUtcTicks;
+            if (since > 0 && since < TimeSpan.TicksPerSecond * 10)
+            {
+                pos += since;
+                if (end > 0 && pos > end) pos = end;
+            }
+        }
+        return pos / TimeSpan.TicksPerMillisecond;
+    }
+
     private double cwForCard() => IslandMetrics.CardWidth;
 
     /// <summary>
@@ -2344,7 +2379,7 @@ public partial class IslandWindow : Window
             string? lyric = null;
             if (snap != null && _settings.Media.ShowLyrics && Sources.MediaSourcePolicy.IsMusicPlayer(snap.SourceId))
             {
-                int posMs = (int)(snap.PositionTicks / TimeSpan.TicksPerMillisecond);
+                int posMs = (int)CurrentPositionMs(snap);
                 lyric = _lyrics.CurrentText(posMs, _lyricOffsetMs);
             }
             if (snap != null) return MediaPillWidth(snap, lyric);
@@ -2746,7 +2781,6 @@ public partial class IslandWindow : Window
             // 节流：每 250ms 校正一次，避免每帧 Measure 的性能开销
             bool fixNow = DateTime.Now - _lastCardHeightFix >= TimeSpan.FromMilliseconds(250);
             if (fixNow) _lastCardHeightFix = DateTime.Now;
-            _lastCardHeightFix = DateTime.Now;
             if (fixNow && wantCard)
             {
                 var cur = (b.Child as ContentPresenter)?.Content as FrameworkElement;

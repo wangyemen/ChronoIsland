@@ -207,7 +207,8 @@ public sealed class MediaSource : IEventSource
                 IsPlaying: status == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing,
                 ProgressPercent: progress,
                 PositionTicks: relPos.Ticks,
-                EndTicks: total.Ticks));
+                EndTicks: total.Ticks,
+                SampledAtUtcTicks: DateTime.UtcNow.Ticks));
         }
         return result;
     }
@@ -421,4 +422,9 @@ public sealed record MediaSnapshot(
     bool IsPlaying,
     int ProgressPercent,
     long PositionTicks = 0,
-    long EndTicks = 0);
+    long EndTicks = 0,
+    /// <summary>
+    /// 本快照的采样时刻（UTC ticks）。GSMTC 的 Position 每 3~4 秒才推一次，
+    /// UI 端可用它做"二次外推"，让进度条/歌词在两次采样之间也平滑推进。
+    /// </summary>
+    long SampledAtUtcTicks = 0);
