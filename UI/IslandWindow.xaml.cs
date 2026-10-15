@@ -624,6 +624,7 @@ public partial class IslandWindow : Window
     private string _cardLyricSig = "";
     /// <summary>卡片展开时刻（用于关闭按钮防误触）</summary>
     private DateTime _cardExpandedAt = DateTime.MinValue;
+
     /// <summary>上次校正展开卡高度的时刻（节流用）</summary>
     private DateTime _lastCardHeightFix = DateTime.MinValue;
 
@@ -1009,14 +1010,12 @@ public partial class IslandWindow : Window
             // 改了子元素 Height 后不失效就仍返回旧值。
             InvalidateTree(content);
 
-            var host = new Border
-            {
-                Width = Math.Max(1, width),
-                Height = double.PositiveInfinity,
-                Child = content
-            };
-            host.Measure(new Size(Math.Max(1, width), double.PositiveInfinity));
-            var h = host.DesiredSize.Height;
+            // 【不能把已挂载的 live 元素再挂到新父级】WPF 会抛
+            // InvalidOperationException: 指定的元素已经是另一个元素的逻辑子元素。
+            // 这里直接对现有元素测量（content 本身已是 ContentPresenter 的内容），
+            // 只给宽度约束，让它按内容自然撑开。
+            content.Measure(new Size(Math.Max(1, width), double.PositiveInfinity));
+            var h = content.DesiredSize.Height;
 
             double scale = IslandMetrics.Scale <= 0 ? 1.0 : IslandMetrics.Scale;
             return double.IsNaN(h) || double.IsInfinity(h) || h <= 0

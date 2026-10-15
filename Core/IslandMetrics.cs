@@ -15,7 +15,7 @@ public static class IslandMetrics
     /// <summary>
     /// 详情卡高度下限（未缩放逻辑值）。
     /// </summary>
-    public const double CardHeightFloor = 600;
+    public const double CardHeightFloor = 200;
 
     /// <summary>
     /// 详情卡高度上限（未缩放逻辑值）——按屏幕可用高度动态算，不写死。
@@ -31,12 +31,12 @@ public static class IslandMetrics
             try
             {
                 double screenH = SystemParameters.WorkArea.Height;   // 逻辑像素
-                if (screenH <= 0) return 820;
+                if (screenH <= 0) return 420;
                 double sc = Scale <= 0 ? 1.0 : Scale;
-                double usable = screenH * 0.82 / sc;                 // 换算到未缩放坐标
+                double usable = screenH * 0.55 / sc;                 // 换算到未缩放坐标
                 return Math.Max(CardHeightFloor, usable);
             }
-            catch { return 820; }
+            catch { return 420; }
         }
     }
 
