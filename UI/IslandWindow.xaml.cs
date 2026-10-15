@@ -1274,7 +1274,7 @@ public partial class IslandWindow : Window
         var meta = new StackPanel
         {
             VerticalAlignment = VerticalAlignment.Center,
-            MaxWidth = 140
+            MaxWidth = 200
         };
         meta.Children.Add(new TextBlock
         {
@@ -1294,9 +1294,9 @@ public partial class IslandWindow : Window
         // 超出宽度时：先按行截断（TextTrimming），必要时整行水平滚动。
         var lyWrap = new Grid
         {
-            // 左边距与外层 16 内边距相配；不再设 MinWidth，
-            // 让它自动占满标题列右侧的【全部剩余宽度】（这才是"歌词区加宽"）。
-            Margin = new Thickness(14, 0, 0, 0),
+            // 歌词列往右让出更多空间给标题列（长标题可完整显示）；
+            // 歌词自身宽度不足时由 RefreshCardLyric 自动滚动，不换行、不增高。
+            Margin = new Thickness(20, 0, 0, 0),
             VerticalAlignment = VerticalAlignment.Center
         };
         lyWrap.ClipToBounds = true;
