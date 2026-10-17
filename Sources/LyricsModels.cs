@@ -58,4 +58,9 @@ public sealed class LyricCacheEntry
     public bool Instrumental { get; set; }
     public List<LyricLine> Lines { get; set; } = new();
     public long CachedAtUnix { get; set; }
+    /// <summary>
+    /// 是否"存疑结果"（疑似残缺，只是当时没有更好的可用）。
+    /// 存疑条目用更短的 TTL，避免一份残缺歌词被冻结 30 天。
+    /// </summary>
+    public bool Suspect { get; set; }
 }

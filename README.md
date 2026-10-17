@@ -7,16 +7,13 @@ Windows 桌面灵动岛。默认**屏幕上什么都没有**——来通知、�
 
 | 路径 | 说明 |
 | --- | --- |
-| <docs/design-0.0.1.md> | 设计文档（唯一约定源：视觉 / 动效 / 状态机 / 模块 / 架构） |
-| <docs/design-lyrics-0.0.1.md> | 歌词功能设计文档（来源轮转 / 胶囊两行布局 / 宽度自适应与自动滚动） |
-| <designWeb/> | **网站发布目录**：index.html（首页）+ styles.html（状态图库）+ demo.html（交互体验），浏览器直接打开 |
-| <样式.html> | 状态图库源文件（旧位置，内容已同步到 <designWeb/styles.html>） |
-| <体验.html> | 集群式堆叠体验页源文件（旧位置，内容已同步到 <designWeb/demo.html>） |
+| <Sources/> <Core/> <UI/> <Native/> | 程序主体：信号源 / 内核 / 界面 / 原生互操作 |
+| <assets/> | 图标与图片资源（程序图标、界面截图、图标概念稿） |
+| <ChronoIsland.csproj> | 工程文件（net10.0-windows、x64、自包含） |
 | <.tools/dotnet/> | 项目本地 .NET 10 SDK（10.0.402），不写入 C 盘 |
 
-> **旧说法 → 新说法**：之前的 [样式.html](<样式.html>) 和 [体验.html](<体验.html>) 已迁移到 <designWeb/> 目录并改名为
-> [styles.html](<designWeb/styles.html>) 与 [demo.html](<designWeb/demo.html>)，另新增 [index.html](<designWeb/index.html>) 作为网站首页。
-> 发布网站时请拷贝整个 <designWeb/> 文件夹；两个根目录旧文件暂时保留以便对照，确认无误后可删除。
+> 设计文档与交互原型位于**独立的设计站点**，不随本仓库分发。源码注释中会引用对应的
+> 设计文档章节（如「设计文档 §3.2」），作为维护时的设计出处索引。
 
 ## 许可
 
@@ -59,6 +56,32 @@ Windows 桌面灵动岛。默认**屏幕上什么都没有**——来通知、�
 图标清单：`bell` `bell-off` `camera` `camera-off` `capslock` `clock` `close` `eye` `eye-off` `info`
 `keyboard` `lock` `monitor` `music` `next` `numlock` `pause` `play` `power` `prev`
 `scrolllock` `settings` `shield` `target` `timer` `unlock`
+
+### 自动更新备用下载源：jsDelivr（MIT / 开源 CDN）
+
+自动更新流程先尝试 **官方 GitHub Releases 资产直链**（<version.txt> 第 2 行）；
+失败（国内网络常连不上 `github.com`）时，<Core/Updater.cs> 会把它翻译成 **jsDelivr** 的
+等价 `gh-releases` 直链再试一次，保证在国内网络下也能拉到同一份 zip。
+
+| 项 | 内容 |
+| --- | --- |
+| 官网 | https://www.jsdelivr.com |
+| 仓库 | https://github.com/jsdelivr/jsdelivr |
+| **许可** | 内容按源文件的许可分发；jsDelivr 服务本身为开源 CDN |
+| 用途 | 读 `version.txt`（gh 仓库文件）+ 下载 release 资产（gh-releases 资产直链） |
+
+### 感谢与致谢
+
+本项目的图标、歌词能力与更新回退链路都来自开源生态，感谢：
+
+| 项目 | 用途 |
+| --- | --- |
+| [Lucide](https://lucide.dev) | 界面 26 个矢量图标（ISC） |
+| [jsDelivr](https://www.jsdelivr.com) | 自动更新包备用下载源（国内网络回退） |
+| [FluidBar](https://github.com/search?q=FluidBar&type=repositories) | EventBus 架构、媒体会话优先级、应用图标提取链路 |
+| [Lyricify](https://github.com/LyricifyOS/LyricsHelper) | 歌词多源轮转、KRC / QRC 解密 |
+
+详细许可说明见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
 ## 交互说明
 
 ### 详情卡展开：悬浮自动 + 点击
@@ -85,7 +108,7 @@ Windows 桌面灵动岛。默认**屏幕上什么都没有**——来通知、�
 程序启动瞬间多个数据源会同时发事件（时钟、时长、媒体、键位）。若一次性全部弹出会糊成一片，
 因此启动阶段走**入场队列**：按优先级从高到低、每 900ms 放一条，同 `Id` 自动去重，队列放空后自动恢复实时响应。
 
-实测时序见 [design-0.0.1.md §5.6b](<docs/design-0.0.1.md>)。
+实测时序见设计文档「入场队列」一节（§5.6b），完整推导见 `Core/PendingQueue.cs`。
 
 ## 运行（三种方式）
 
@@ -104,7 +127,7 @@ Windows 桌面灵动岛。默认**屏幕上什么都没有**——来通知、�
 > 背景：之前 `SelfContained=false` 时 publish 出的是"框架依赖"exe，启动时会去系统里找
 > .NET 10 Windows Desktop 运行时，找不到就弹"您必须安装或更新 .NET"。改为自包含后彻底绕开这个问题。
 >
-> 代价：publish 目录会大很多（约 100MB+，含 254 个文件）。分发 / 拷走时用整个文件夹，不要只拷 exe。
+> 代价：publish 目录会大很多（约 209 MB、533 个文件）。分发 / 拷走时用整个文件夹，不要只拷 exe。
 
 ## 构建与运行
 
@@ -124,7 +147,7 @@ SDK 与 NuGet 缓存都在项目内 `.tools`，不写入 C 盘。
 
 ## 当前进度
 
-- [x] M0 交互原型（样式.html + 体验.html）
+- [x] M0 交互原型（状态图库 + 交互演示，浏览器可视化验证）
 - [x] M1 岛窗口 + SpringEngine + 母形态
 - [x] M2 水珠生成 / 收起动效
 - [x] M3 EventBus + 集群栈（胶囊 ⇄ 球体互换）

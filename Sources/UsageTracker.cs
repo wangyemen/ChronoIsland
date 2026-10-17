@@ -152,6 +152,45 @@ public sealed class UsageTracker : IEventSource
         return result;
     }
 
+    /// <summary>
+    /// 本周（周一至周日）的聚合结果。
+    /// 一周最多跨两个月边界，因此按月文件分别打开，但只扫描一遍会话。
+    /// </summary>
+    public static List<UsageDay> LoadWeek(DateTime anyDayInWeek)
+    {
+        var start = StartOfWeek(anyDayInWeek);
+        var days = new List<UsageDay>();
+        for (int i = 0; i < 7; i++) days.Add(new UsageDay(start.AddDays(i)));
+
+        try
+        {
+            var files = days.Select(d => FileFor(d.Date)).Distinct().ToList();
+            foreach (var file in files)
+            {
+                if (!File.Exists(file)) continue;
+                foreach (var line in File.ReadAllLines(file))
+                {
+                    if (string.IsNullOrWhiteSpace(line)) continue;
+                    UsageSession? s;
+                    try { s = JsonSerializer.Deserialize<UsageSession>(line); } catch { continue; }
+                    if (s == null) continue;
+                    var idx = days.FindIndex(d => d.Date == s.Start.Date);
+                    if (idx < 0) continue;
+                    days[idx].Add(s.ProcessName, s.End - s.Start);
+                }
+            }
+        }
+        catch (Exception ex) { App.Log("Usage", ex); }
+        return days;
+    }
+
+    /// <summary>所在周的周一 00:00（周一为一周之首）</summary>
+    public static DateTime StartOfWeek(DateTime d)
+    {
+        int delta = ((int)d.DayOfWeek + 6) % 7;   // 周一=0 … 周日=6
+        return d.Date.AddDays(-delta);
+    }
+
     private void EmitToday()
     {
         var agg = Load(DateTime.Today);
@@ -165,7 +204,13 @@ public sealed class UsageTracker : IEventSource
             Priority: Priority,
             Title: $"今日已用 {(int)total.TotalHours}h {total.Minutes}m",
             Subtitle: top.Key is null ? "" : $"{top.Key} · {(int)top.Value.TotalHours}h {top.Value.Minutes}m",
-            Policy: new IslandPolicy(TimeSpan.FromSeconds(4), Expandable: true))
+            // 【常驻不自动消失】使用时长是「随时想看随时看」的统计岛。
+            // 之前 TTL 只有 4 秒：启动时弹一下，用户还没来得及悬停就被收走，
+            // 于是周视图永远点不开（表现为「找不到周视图」）。
+            // Ttl 必须传【null】而不是 TimeSpan.Zero ——
+            // UI 侧判断是 `if (ev.Policy?.Ttl is TimeSpan)`，
+            // Zero 仍会被当成有 TTL 并立刻收起，只有 null 才是真正的常驻。
+            Policy: new IslandPolicy(null, Expandable: true))
         { AppKey = top.Key ?? "usage" });
     }
 
@@ -180,3 +225,21 @@ public sealed class UsageTracker : IEventSource
 }
 
 public sealed record UsageSession(string ProcessName, DateTime Start, DateTime End);
+
+/// <summary>某一天的使用时长聚合（供周视图树状图使用）</summary>
+public sealed class UsageDay
+{
+    public UsageDay(DateTime date) { Date = date.Date; }
+    public DateTime Date { get; }
+    public Dictionary<string, TimeSpan> Apps { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public TimeSpan Total => Apps.Values.Aggregate(TimeSpan.Zero, (a, b) => a + b);
+    /// <summary>是否已到当天 24:00 之后（未来日期不显示数据）</summary>
+    public bool IsFuture => Date > DateTime.Today;
+    /// <summary>当天是否已经开始过（今天及之前）</summary>
+    public bool HasStarted => Date <= DateTime.Today;
+    public void Add(string app, TimeSpan dur)
+    {
+        if (dur <= TimeSpan.Zero) return;
+        Apps[app] = Apps.TryGetValue(app, out var v) ? v + dur : dur;
+    }
+}

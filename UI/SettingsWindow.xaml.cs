@@ -83,9 +83,10 @@ public partial class SettingsWindow : Window
             "media" => ("媒体控制", "会话选择与显示行为", BuildMediaPage()),
             "notify" => ("通知接管", "在灵动岛显示系统通知", BuildNotifyPageWithQuery()),
             "sys" => ("系统状态", "键位翻转 · 解锁进入桌面 · 摄像头占用", BuildSysPage()),
+            "dsh" => ("DeepSeek Harness", "在灵动岛显示 DSH 的工作状态（只读，不改 DSH）", BuildDshPage()),
             "theme" => ("主题与材质", "深浅色与玻璃效果", BuildThemePage()),
             "anim" => ("动画", "弹簧物理参数", BuildAnimPage()),
-            "about" => ("关于", "版本与资源", BuildAboutPage()),
+            "about" => ("关于", "版本、资源与致谢", BuildAboutPage()),
             _ => ("常规", "开机自启与基础行为", BuildGeneralPage())
         };
         PageTitle.Text = title;
@@ -268,6 +269,15 @@ public partial class SettingsWindow : Window
         TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 10)
     };
 
+    /// <summary>时长格式化：不足 1 小时用「Xm」，否则「Xh Ym」</summary>
+    private static string FmtDur(TimeSpan ts)
+    {
+        if (ts <= TimeSpan.Zero) return "0m";
+        int h = (int)ts.TotalHours;
+        int m = ts.Minutes;
+        return h > 0 ? $"{h}h {m:00}m" : $"{m}m";
+    }
+
     private TextBlock H4(string text) => new()
     {
         Text = text, FontSize = 13.5, FontWeight = FontWeights.SemiBold,
@@ -313,6 +323,128 @@ public partial class SettingsWindow : Window
             PreviewRow("摄像头占用", "camera")));
 
         return sp;
+    }
+
+    /// <summary>
+    /// DeepSeek Harness 工作状态页。
+    /// 数据完全来自 DSH 自己的投影缓存（明文 JSON），本源只读，不向 DSH 写入任何东西。
+    /// </summary>
+    private UIElement BuildDshPage()
+    {
+        var sp = new StackPanel();
+        var dsh = _settings.Dsh;
+
+        sp.Children.Add(Group("总开关",
+            Row("在灵动岛显示 DSH 工作状态", "DSH 开始工作时浮现「工作中」，空闲后自动收起",
+                Toggle(dsh.Enabled, v => dsh.Enabled = v))));
+
+        sp.Children.Add(Group("数据来源", Desc(
+            "只读 DSH 的会话投影缓存（明文 JSON），不解码日志、不调用任何接口、不修改 DSH 任何文件。" +
+            @"路径：<DSH_HOME>\storages\session_projcache\sessions\<会话id>.json"),
+            Row("DSH 主目录", HintDshHome(), null),
+            Row("自定义主目录（留空自动探测）", @"自动探测顺序：此处 → 环境变量 DSH_HOME → D:\dsh\home",
+                TextBoxSetting(dsh.HomeOverride, v => { dsh.HomeOverride = v; }))));
+
+        sp.Children.Add(Group("显示内容",
+            Row("显示会话标题", "第一行显示本次会话的首条提问；关闭则固定显示「DSH 工作中」",
+                Toggle(dsh.ShowTitle, v => dsh.ShowTitle = v)),
+            Row("显示上下文占用", "第二行显示上下文用量百分比（surfaceTokens / contextWindow）",
+                Toggle(dsh.ShowContext, v => dsh.ShowContext = v))));
+
+        sp.Children.Add(Group("多任务", Desc(
+            "DSH 可以同时开多个会话各自跑任务——<b>每个工作中的会话各占一条岛</b>，各自独立显示与收起。"
+            + "会话很多时，只显示最近活动的若干条（见下方上限），避免挤掉通知与媒体。")));
+
+
+        sp.Children.Add(Group("行为",
+            SliderRow("轮询间隔", dsh.PollMs, 300, 5000, "毫秒", v => dsh.PollMs = (int)v),
+            SliderRow("空闲后收起延迟", dsh.IdleHideSeconds, 2, 60, "秒", v => dsh.IdleHideSeconds = (int)v),
+            SliderRow("完成提示停留", dsh.DoneFlashSeconds, 0, 30, "秒",
+                v => dsh.DoneFlashSeconds = (int)v),
+            SliderRow("并发任务最多显示", dsh.MaxIslands, 1, 6, "条",
+                v => dsh.MaxIslands = (int)v)));
+
+        sp.Children.Add(Group("当前状态", Desc("实时读取一次，确认链路是否正常。"),
+            Row("探测结果", "点右侧按钮立即刷新", DshProbeButton()),
+            _dshProbeText = new TextBlock
+            {
+                FontSize = 11.5,
+                Foreground = AppTheme.Current.TextSecondary,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(12, 8, 12, 4)
+            }));
+
+        RefreshDshProbe();
+        return sp;
+    }
+
+    private TextBlock? _dshProbeText;
+
+    private Button DshProbeButton()
+    {
+        var b = new Button
+        {
+            Content = "立即检测",
+            Padding = new Thickness(12, 5, 12, 5),
+            FontSize = 11.5
+        };
+        b.Click += (_, _) => RefreshDshProbe();
+        return b;
+    }
+
+    private void RefreshDshProbe()
+    {
+        if (_dshProbeText == null) return;
+        try
+        {
+            var home = Sources.DshSource.HomeDir();
+            if (home == null)
+            {
+                _dshProbeText.Text = "✗ 未找到 DSH 主目录。请确认 DSH 已安装，或在上面手动填写主目录。";
+                return;
+            }
+            var snap = Sources.DshSource.ReadActiveSession();
+            if (snap == null)
+            {
+                _dshProbeText.Text = "✗ 已找到 DSH 主目录（" + home + "），但读不到任何会话缓存。\n"
+                    + "  请确认 DSH 至少打开过一次会话。";
+                return;
+            }
+            _dshProbeText.Text = "✓ 主目录：" + home + "\n"
+                + "  状态：" + (snap.Working ? "工作中" : "空闲") + "\n"
+                + "  会话：" + snap.Title + "\n"
+                + "  进度：第 " + Math.Max(snap.Turn, 1) + " 轮 · 共 " + snap.Steps + " 步\n"
+                + "  上下文：" + snap.SurfaceTokens + " / " + snap.ContextWindow
+                + "（" + snap.ContextPercent + "%）\n"
+                + "  模型：" + snap.Model;
+        }
+        catch (Exception ex)
+        {
+            _dshProbeText.Text = "✗ 读取失败：" + ex.Message;
+        }
+    }
+
+    private string HintDshHome()
+    {
+        try
+        {
+            var h = Sources.DshSource.HomeDir();
+            return h == null ? "未探测到（DSH 可能未安装）" : "当前探测到：" + h;
+        }
+        catch { return "探测失败"; }
+    }
+
+    /// <summary>文本输入行（失焦或回车时保存）</summary>
+    private System.Windows.Controls.TextBox TextBoxSetting(string value, Action<string> changed)
+    {
+        var tb = new System.Windows.Controls.TextBox { Text = value ?? "", Width = 220, FontSize = 11.5 };
+        void Commit() { if (_loading) return; changed(tb.Text ?? ""); _settings.Save(); }
+        tb.LostFocus += (_, _) => Commit();
+        tb.KeyDown += (_, e) =>
+        {
+            if (e.Key == System.Windows.Input.Key.Enter) { Commit(); e.Handled = true; }
+        };
+        return tb;
     }
 
     /// <summary>预览行：点一下就在灵动岛弹一条示例岛</summary>
@@ -365,7 +497,211 @@ public partial class SettingsWindow : Window
             Row("悬停暂停计时", "指针在岛上时不进入倒计时", Toggle(true, _ => { })),
             SliderRow("默认显示时长", _settings.Notification.TtlSeconds, 2, 15, "秒",
                 v => _settings.Notification.TtlSeconds = (int)v)));
+        sp.Children.Add(Group("更新",
+            Desc("版本信息读取自仓库根目录的 version.txt（第 1 行版本号、第 2 行 zip 下载链接）。"),
+            Row("启动时检查更新", "发现新版本时提示", Toggle(_settings.General.CheckUpdateOnStart,
+                v => _settings.General.CheckUpdateOnStart = v)),
+            Row("自动安装更新", "下载完成后替换程序并自动重启", Toggle(_settings.General.AutoInstallUpdate,
+                v => _settings.General.AutoInstallUpdate = v)),
+            BuildUpdatePanel()));
         return sp;
+    }
+
+    // ================= 更新面板 =================
+    private TextBlock? _updateStatusText;
+    private Border? _updateCheckBtn;
+    private Button? _updateInstallBtn;
+    private UpdateInfo? _pendingUpdate;
+    private bool _updateBusy;
+
+    /// <summary>
+    /// 更新状态区块：当前版本 + 检查按钮 + 有新版时的安装按钮。
+    /// 网络动作都在后台线程，UI 只更新文本，避免设置窗口卡住。
+    /// </summary>
+    private Border BuildUpdatePanel()
+    {
+        var box = new StackPanel { Margin = new Thickness(0, 2, 0, 0) };
+
+        _updateStatusText = new TextBlock
+        {
+            Text = $"当前版本 {Updater.CurrentVersion}",
+            FontSize = 12, Foreground = AppTheme.Current.TextSecondary,
+            VerticalAlignment = VerticalAlignment.Center,
+            TextWrapping = TextWrapping.Wrap
+        };
+        box.Children.Add(_updateStatusText);
+
+        var btns = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 10, 0, 0) };
+        _updateCheckBtn = BuildCheckUpdateButton();
+        btns.Children.Add(_updateCheckBtn);
+
+        _updateInstallBtn = new Button
+        {
+            Content = "下载并更新", Padding = new Thickness(12, 5, 12, 5), FontSize = 11.5,
+            Margin = new Thickness(8, 0, 0, 0), Visibility = Visibility.Collapsed
+        };
+        _updateInstallBtn.Click += async (_, _) => await InstallUpdateAsync();
+        btns.Children.Add(_updateInstallBtn);
+        box.Children.Add(btns);
+
+        return new Border { Child = box };
+    }
+
+    /// <summary>
+    /// 「检查更新」按钮：渐变描边药丸 + hover 上浮发光。
+    /// 与设置页其它 Pill 按钮协调，但用渐变描边把它从普通操作里提出来。
+    /// busy 时整块禁用（旋转图标由 SetUpdateBusy 管理）。
+    /// </summary>
+    private Border BuildCheckUpdateButton()
+    {
+        var t = AppTheme.Current;
+
+        var icon = new TextBlock
+        {
+            Text = "⟳", FontSize = 13, Margin = new Thickness(8, 0, 6, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+            Foreground = t.Accent,
+            RenderTransform = new RotateTransform()
+        };
+        var label = new TextBlock
+        {
+            Text = "检查更新", FontSize = 12, FontWeight = FontWeights.SemiBold,
+            VerticalAlignment = VerticalAlignment.Center,
+            Foreground = t.TextPrimary
+        };
+        var content = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Margin = new Thickness(0, 5, 0, 5),
+            Children = { icon, label }
+        };
+
+        // 渐变描边（左上蓝 → 右下紫，与 AccentGradient 同一组色）
+        var glow = new LinearGradientBrush(
+            new GradientStopCollection {
+                new GradientStop(Color.FromRgb(0x6A, 0xA2, 0xFF), 0),
+                new GradientStop(Color.FromRgb(0xA7, 0x8B, 0xFA), 1)
+            })
+        { StartPoint = new Point(0, 0), EndPoint = new Point(1, 1) };
+
+        var btn = new Border
+        {
+            Child = content,
+            Cursor = Cursors.Hand,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            Background = t.RowSurface,
+            CornerRadius = new CornerRadius(16),
+            Padding = new Thickness(8, 0, 8, 0),
+            BorderBrush = glow,
+            BorderThickness = new Thickness(1)
+        };
+        btn.RenderTransformOrigin = new Point(0.5, 0.5);
+        _checkIcon = icon;
+
+        // hover：轻上浮 + 柔和发光；busy 时不响应
+        btn.MouseEnter += (_, _) =>
+        {
+            if (_updateBusy) return;
+            btn.RenderTransform = new TranslateTransform(0, -1);
+            btn.Effect = new System.Windows.Media.Effects.DropShadowEffect
+            {
+                Color = Color.FromRgb(0x6A, 0xA2, 0xFF),
+                BlurRadius = 12, ShadowDepth = 0, Opacity = 0.35
+            };
+        };
+        btn.MouseLeave += (_, _) =>
+        {
+            btn.RenderTransform = new TranslateTransform(0, 0);
+            btn.Effect = null;
+        };
+        btn.MouseLeftButtonUp += async (_, _) => await CheckUpdateAsync(manual: true);
+        return btn;
+    }
+
+    private TextBlock? _checkIcon;
+
+    /// <summary>busy 状态：禁用 + 图标旋转</summary>
+    private void SetUpdateBusy(bool busy)
+    {
+        _updateBusy = busy;
+        if (_updateCheckBtn != null) _updateCheckBtn.IsEnabled = !busy;
+        if (_checkIcon == null) return;
+        if (busy)
+        {
+            var rot = new RotateTransform { Angle = 0 };
+            _checkIcon.RenderTransform = rot;
+            rot.BeginAnimation(RotateTransform.AngleProperty,
+                new DoubleAnimation(0, 360, TimeSpan.FromSeconds(1)) { RepeatBehavior = RepeatBehavior.Forever });
+        }
+        else
+        {
+            _checkIcon.RenderTransform = null;
+        }
+    }
+
+    /// <summary>检查更新（manual=true 时无论有无新版都给反馈）</summary>
+    private async Task CheckUpdateAsync(bool manual)
+    {
+        if (_updateBusy || _updateStatusText == null) return;
+        SetUpdateBusy(true);
+        _updateStatusText.Text = "正在检查…";
+
+        var info = await Task.Run(() => Updater.FetchLatestAsync());
+        SetUpdateBusy(false);
+
+        if (info == null)
+        {
+            _updateStatusText.Text = manual
+                ? $"检查失败（网络或版本文件不可达）\n当前版本 {Updater.CurrentVersion}"
+                : $"当前版本 {Updater.CurrentVersion}";
+            return;
+        }
+
+        if (!Updater.IsNewer(info.Version, Updater.CurrentVersion))
+        {
+            _pendingUpdate = null;
+            if (_updateInstallBtn != null) _updateInstallBtn.Visibility = Visibility.Collapsed;
+            _updateStatusText.Text = $"已是最新版本（{Updater.CurrentVersion}）";
+            return;
+        }
+
+        _pendingUpdate = info;
+        if (_updateInstallBtn != null) _updateInstallBtn.Visibility = Visibility.Visible;
+        var notes = string.IsNullOrWhiteSpace(info.Notes) ? "" : $"\n{info.Notes}";
+        _updateStatusText.Text = $"发现新版本 {info.Version}（当前 {Updater.CurrentVersion}）{notes}";
+
+        // 自动安装模式：不打扰用户，直接开始下载
+        if (!manual && _settings.General.AutoInstallUpdate)
+            await InstallUpdateAsync();
+    }
+
+    /// <summary>下载并应用更新；成功后程序自动退出以便替换文件</summary>
+    private async Task InstallUpdateAsync()
+    {
+        if (_updateBusy || _pendingUpdate == null) return;
+        SetUpdateBusy(true);
+        if (_updateInstallBtn != null) _updateInstallBtn.IsEnabled = false;
+        _updateStatusText!.Text = "正在下载更新…";
+
+        var info = _pendingUpdate;
+        var ok = await Updater.DownloadAndApplyAsync(info,
+            p => Dispatcher.InvokeAsync(() =>
+            {
+                if (_updateStatusText != null)
+                    _updateStatusText.Text = $"正在下载更新… {p * 100:0}%";
+            }));
+
+        if (!ok)
+        {
+            SetUpdateBusy(false);
+            if (_updateInstallBtn != null) _updateInstallBtn.IsEnabled = true;
+            _updateStatusText.Text = "更新失败，请检查网络后重试，或手动到仓库下载：\n" + Updater.RepoUrl;
+            return;
+        }
+
+        _updateStatusText.Text = "更新已下载，程序即将关闭并自动完成安装…";
+        await Task.Delay(1200);
+        System.Windows.Application.Current.Shutdown();
     }
 
     private UIElement BuildClockPage()
@@ -388,6 +724,11 @@ public partial class SettingsWindow : Window
         var sp = new StackPanel();
         var agg = UsageTracker.Load(DateTime.Today);
         var total = agg.Values.Aggregate(TimeSpan.Zero, (a, b) => a + b);
+        // 本周：只统计已过去的日子（今天及之前），未来几天不参与平均
+        var week = UsageTracker.LoadWeek(DateTime.Today);
+        var weekTotal = week.Where(d => d.HasStarted).Aggregate(TimeSpan.Zero, (a, d) => a + d.Total);
+        var elapsed = week.Count(d => d.HasStarted);
+        var weekAvg = elapsed > 0 ? weekTotal / elapsed : TimeSpan.Zero;
 
         // 统计卡
         var stats = new Grid { Margin = new Thickness(0, 0, 0, 16) };
@@ -396,8 +737,10 @@ public partial class SettingsWindow : Window
 
         var cards = new (string K, string V, string? D, Brush? C)[]
         {
-            ("今日总计", total > TimeSpan.Zero ? $"{(int)total.TotalHours}h {total.Minutes}m" : "0h 0m", null, AppTheme.Current.Success),
-            ("本周平均", "—", null, null),
+            ("今日总计", FmtDur(total), null, AppTheme.Current.Success),
+            // 之前这里写死 "—"，导致设置页永远看不到任何周数据
+            ("本周总计", FmtDur(weekTotal),
+                $"日均 {FmtDur(weekAvg)} · 已过 {elapsed} 天", null),
             ("收录应用", agg.Count.ToString(), null, null)
         };
         for (int i = 0; i < cards.Length; i++)
@@ -424,6 +767,31 @@ public partial class SettingsWindow : Window
             stats.Children.Add(card);
         }
         sp.Children.Add(stats);
+
+        // ---- 本周树状图（与灵动岛里的是同一套渲染）----
+        sp.Children.Add(H4("本周使用时长"));
+        sp.Children.Add(Desc("周一至周日固定 7 行；条形按本周最长的一天为基准，空闲超过 5 分钟不计入"));
+        {
+            var maxMin = week.Count > 0 ? week.Max(d => d.Total.TotalMinutes) : 0;
+            if (maxMin <= 0) maxMin = 1;
+            var wg = new Grid();
+            for (int i = 0; i < week.Count; i++) wg.RowDefinitions.Add(new RowDefinition());
+            // 设置页比灵动岛卡宽得多，条形可用宽度给足
+            double pageBarMax = Math.Max(120, Math.Max(1, ActualWidth) - 150);
+            for (int i = 0; i < week.Count; i++)
+            {
+                var r2 = IslandWindow.BuildWeekRow(week[i], maxMin, AppTheme.Current, pageBarMax);
+                Grid.SetRow(r2, i);
+                wg.Children.Add(r2);
+            }
+            sp.Children.Add(new Border
+            {
+                Background = AppTheme.Current.RowSurface, BorderBrush = AppTheme.Current.Stroke,
+                BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(16),
+                Padding = new Thickness(15, 13, 15, 13), Child = wg,
+                Margin = new Thickness(0, 0, 0, 16)
+            });
+        }
 
         // 排行
         sp.Children.Add(H4("今日应用排行"));
@@ -721,6 +1089,24 @@ public partial class SettingsWindow : Window
                     ApplyGeometryToIsland();
                 }))));
 
+        sp.Children.Add(Group("悬浮侧列球体", Desc(
+            "侧列的球体（未读消息 / 其它模块）可以被鼠标悬浮。\n\n" +
+            "共同流程：<b>球体 → 胶囊 → 详情卡</b>（先提到中央变胶囊，再由胶囊展开）。\n" +
+            "指针需在球体上停留约 120 ms 才生效，避免横向扫过时误触发。\n\n" +
+            "两个开关互相独立，可分别关闭。"),
+            Row("半透明穿透态悬浮球体", "还没停留够、岛仍是穿透状态时就响应（推荐开启）",
+                Toggle(_settings.Island.HoverSphereInPassive, v =>
+                {
+                    _settings.Island.HoverSphereInPassive = v;
+                    ApplyGeometryToIsland();
+                })),
+            Row("可交互态悬浮球体", "停留够久、岛已不透明可交互时才响应",
+                Toggle(_settings.Island.HoverSphereInInteractive, v =>
+                {
+                    _settings.Island.HoverSphereInInteractive = v;
+                    ApplyGeometryToIsland();
+                }))));
+
         sp.Children.Add(Group("详情卡展开",
             Desc("两种方式都会生成同一张详情卡，卡片右上角都有关闭按钮。"),
             SliderRow("悬浮多久自动展开", _settings.Island.HoverExpandMs, 0, 2000, "毫秒", v =>
@@ -791,17 +1177,86 @@ public partial class SettingsWindow : Window
     private UIElement BuildAboutPage()
     {
         var sp = new StackPanel();
-        sp.Children.Add(Group("ChronoIsland 时序岛",
-            Desc("Windows 桌面灵动岛 · v0.0.1 开发版"),
+        sp.Children.Add(Group("时序岛",
+            Desc("Windows 桌面灵动岛 · v0.0.2 开发版"),
             Row("运行环境", ".NET 10 · WPF · Windows 10 19041+", null),
-            Row("参考项目", "FluidBar（EventBus 架构与媒体实现）", null),
             Row("图标", "assets/icon.ico · 7 个尺寸", null)));
+
+        // 感谢与致谢：列出使用与借鉴的开源项目
+        sp.Children.Add(Group("致谢 · 使用的开源项目",
+            Desc("感谢以下开源项目。没有它们，时序岛不会是这个样子。点击任意一行可跳到仓库主页。"),
+            OpenSourceRow("Lucide",
+                "界面全部矢量图标（26 个 SVG，运行时由自研渲染器解析）。",
+                "https://github.com/lucide-icons/lucide"),
+            OpenSourceRow("jsDelivr",
+                "更新包的备用下载源。GitHub 官方资产链连不上时自动回退到 jsDelivr 等价直链。",
+                "https://github.com/jsdelivr/jsdelivr"),
+            OpenSourceRow("FluidBar",
+                "媒体 / 通知 / 图标提取等多处架构借鉴（EventBus、会话优先级、AUMID→进程→窗口图标链路）。",
+                "https://github.com/search?q=FluidBar&type=repositories"),
+            OpenSourceRow("Lyricify",
+                "歌词获取：QQ音乐 / 网易云 / 酷狗 / 汽水 / LRCLIB 多源轮转、KRC 与 QRC 解密。",
+                "https://github.com/LyricifyOS/LyricsHelper")));
+
         var openBtn = new Button { Content = "打开数据目录", Style = (Style)FindResource("Pill"),
             HorizontalAlignment = HorizontalAlignment.Left };
         openBtn.Click += (_, _) => OpenDataFolder();
-        sp.Children.Add(Group("数据", Row("本地目录", "%LOCALAPPDATA%\\ChronoIsland", null)));
-        sp.Children.Add(openBtn);
+        sp.Children.Add(Group("数据",
+            Row("本地目录", "%LOCALAPPDATA%\\ChronoIsland", null),
+            openBtn));
         return sp;
+    }
+
+    /// <summary>关于页里一条「开源项目」行：名称加粗 + 说明 + 仓库链接，点击可跳转。</summary>
+    private UIElement OpenSourceRow(string name, string desc, string url)
+    {
+        var t = AppTheme.Current;
+        var grid = new Grid { Margin = new Thickness(0, 6, 0, 6) };
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(90) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+        var nameCell = new TextBlock
+        {
+            Text = name, FontSize = 12.5, FontWeight = FontWeights.SemiBold,
+            Foreground = t.TextPrimary, VerticalAlignment = VerticalAlignment.Top,
+            TextWrapping = TextWrapping.Wrap
+        };
+        Grid.SetColumn(nameCell, 0);
+        grid.Children.Add(nameCell);
+
+        var right = new StackPanel();
+        right.Children.Add(new TextBlock
+        {
+            Text = desc, FontSize = 11.5, Foreground = t.TextSecondary,
+            TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 2)
+        });
+        var link = new TextBlock
+        {
+            Text = url, FontSize = 11, Foreground = t.Accent,
+            TextDecorations = TextDecorations.Underline, Cursor = Cursors.Hand,
+            TextWrapping = TextWrapping.Wrap
+        };
+        link.MouseLeftButtonUp += (_, _) =>
+        {
+            try
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = url, UseShellExecute = true
+                });
+            }
+            catch (Exception ex) { App.Log("About", ex); }
+        };
+        right.Children.Add(link);
+        Grid.SetColumn(right, 1);
+        grid.Children.Add(right);
+
+        return new Border
+        {
+            Style = (Style)FindResource("Row"),
+            Child = grid,
+            Margin = new Thickness(0, 0, 0, 6)
+        };
     }
 
     /// <summary>几何设置变化 → 立即应用到灵动岛并推一条示例岛</summary>

@@ -9,8 +9,19 @@ public static class IslandMetrics
     // ---- 固定值 ----
     public const double IslandHeight = 36;
     public const double MinWidth = 36;              // = 正圆，收起终点几何
-    /// <summary>详情卡宽度（与胶囊上限一致，不额外加宽）</summary>
-    public const double CardWidth = 420;
+    /// <summary>
+    /// 详情卡宽度。
+    ///
+    /// 【为什么从 420 提到 520】420 宽扣掉左右内边距(16×2)与封面列(56+12)后，
+    /// 文本可用宽只有 320px。实测几个长歌名的实际宽度：
+    ///   "Exogenesis: Symphony Pt. 2 (Cross-pollination)" = 332.9px
+    ///   "United States of Eurasia (+Collateral Damage)"  = 323.6px
+    /// 都超过 320 —— 于是展开卡里长歌名必然被压/被截（收起态反而能显示全）。
+    /// 520 宽时可用文本宽 = 520-32-68 = 420px，上述歌名都能完整放下，
+    /// 只有极端长名才落到跑马灯兜底。
+    /// （胶囊态上限仍由 IslandMetrics.MaxWidth 控制，不受这里影响。）
+    /// </summary>
+    public const double CardWidth = 520;
     public const double CardMinHeight = 96;
     /// <summary>
     /// 详情卡高度下限（未缩放逻辑值）。

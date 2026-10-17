@@ -22,7 +22,19 @@ public static class Program
         }
         if (args.Length > 0 && args[0] == "lyrics")
         {
-            if (args.Length > 2) LyricsDiag.RunOne(args[1], args[2]);
+            if (args.Length > 1 && args[1] == "rotate")
+            {
+                LyricsDiag.RunRotation();
+                return;
+            }
+            if (args.Length > 2)
+            {
+                // 可选第 4 个参数：时长（毫秒）。真实播放链路是带时长的，
+                // 而时长参与匹配打分，不带它测出的结果会偏悲观。
+                int durMs = 0;
+                if (args.Length > 3) int.TryParse(args[3], out durMs);
+                LyricsDiag.RunOne(args[1], args[2], durMs);
+            }
             else LyricsDiag.Run();
             return;
         }
@@ -156,6 +168,24 @@ public static class Program
                 Console.WriteLine("失败: " + ex.GetType().Name + ": " + ex.Message);
                 if (ex.InnerException != null) Console.WriteLine("  内部: " + ex.InnerException.Message);
             }
+            return;
+        }
+        if (args.Length > 0 && args[0] == "dsh")
+        {
+            int sec = 0;
+            if (args.Length > 1 && args[1] == "watch")
+                sec = args.Length > 2 && int.TryParse(args[2], out var ws) ? ws : 20;
+            DshDiag.Run(sec);
+            return;
+        }
+        if (args.Length > 0 && args[0] == "dshrender")
+        {
+            DshRenderDiag.Run(args.Length > 1 ? args[1] : "");
+            return;
+        }
+        if (args.Length > 0 && (args[0] == "pillwidth" || args[0] == "widthdiag"))
+        {
+            PillWidthDiag.Run();
             return;
         }
         if (args.Length > 0 && args[0] == "geom")

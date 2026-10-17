@@ -76,7 +76,7 @@ public sealed class Spring
     }
 }
 
-/// <summary>弹簧预设（与 docs/design-0.0.1.md §3.2 冻结值一致）</summary>
+/// <summary>弹簧预设（与 designWeb/docs/design-0.0.1.md §3.2 冻结值一致）</summary>
 public static class SpringPresets
 {
     /// <summary>宽度变化、内容替换 — 轻微回弹</summary>

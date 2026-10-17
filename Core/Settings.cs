@@ -18,6 +18,7 @@ public sealed class Settings
     public MediaSettings Media { get; set; } = new();
     public GameSettings Game { get; set; } = new();
     public SysSettings Sys { get; set; } = new();
+    public DshSettings Dsh { get; set; } = new();
     public GeneralSettings General { get; set; } = new();
 
     [JsonIgnore]
@@ -77,6 +78,19 @@ public sealed class IslandSettings
 
     /// <summary>按住 Alt 时强制穿透（保险：万一误拦截可点到底下内容）</summary>
     public bool AltForceThrough { get; set; } = true;
+
+    /// <summary>
+    /// 半透明穿透态悬浮球体 -> 提升为胶囊。
+    /// 该状态下岛是 WS_EX_TRANSPARENT，收不到鼠标事件，由命中轮询驱动；
+    /// 开启后指针停在球体上约 120ms 就会把它提到中央胶囊（再由胶囊展开详情卡）。
+    /// </summary>
+    public bool HoverSphereInPassive { get; set; } = true;
+
+    /// <summary>
+    /// 可交互态（已停留够久、不再穿透）悬浮球体 -> 提升为胶囊。
+    /// 与上一项分开控制：有些人只想要"可交互后才有反应"。
+    /// </summary>
+    public bool HoverSphereInInteractive { get; set; } = true;
 }
 
 public sealed class ThemeSettings
@@ -120,7 +134,7 @@ public sealed class MediaSettings
     /// <summary>是否只在播放时显示（暂停立即收起）</summary>
     public bool HideWhenPaused { get; set; }
 
-    // ---- 歌词（docs/design-lyrics-0.0.1.md）----
+    // ---- 歌词（designWeb/docs/design-lyrics-0.0.1.md）----
     /// <summary>是否在胶囊态显示歌词（开启后胶囊会增高一行）</summary>
     public bool ShowLyrics { get; set; }
     /// <summary>歌词时间轴偏移（毫秒），LRC 常有数百毫秒偏差，供用户微调</summary>
@@ -173,6 +187,57 @@ public sealed class SysSettings
     public bool AutoHideNumlockNoNumpad { get; set; } = true;
 }
 
+/// <summary>
+/// DeepSeek Harness 工作状态模块。
+///
+/// 【数据来源】直接只读 DSH 的会话投影缓存（明文 JSON，非 zstd）：
+///   <c>%DSH_HOME%\storages\session_projcache\sessions\&lt;sessionId&gt;.json</c>
+/// 该文件由 DSH 原子写入（实测 68 文件 / 高频轮询 0 次解析失败，且无 .tmp/.lock 伴随文件），
+/// 因此可以安全并发读取。关键字段：
+///   · <c>record.rows.sessionStats.val.openStep</c> —— 非 null 即"正在跑某一步"（工作中）
+///   · <c>record.rows.contextPressure.val</c>     —— 上下文占用 surfaceTokens / contextWindow
+///   · <c>record.rows.tokenUsage.val</c>          —— 累计 token 与最近一步增量
+///   · <c>record.rows.title.val</c>               —— 会话标题
+///   · <c>record.rows.modelSelection.val.lastUsed</c> —— 当前模型
+///
+/// 【为什么不用别的信号】窗口标题恒为静态 "DeepSeek Harness"；
+/// 会话日志 session.v4.jsonl.zstd 是多帧拼接 zstd，.NET 侧无可用解码器；
+/// HTTP /api 需要 browser-trust cookie 与其签名密钥，过于脆弱。
+/// </summary>
+public sealed class DshSettings
+{
+    /// <summary>整个模块总开关</summary>
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>DSH 数据主目录；为空则自动探测（环境变量 DSH_HOME → 常见默认位置）</summary>
+    public string HomeOverride { get; set; } = "";
+
+    /// <summary>轮询间隔（毫秒）。投影缓存实时更新，1s 足够且开销极低。</summary>
+    public int PollMs { get; set; } = 1000;
+
+    /// <summary>
+    /// 空闲多久后收起工作岛（秒）。用于兜住 openStep 在"步与步之间"短暂为 null 的间隙，
+    /// 避免灵动岛在连续工作中闪烁。
+    /// </summary>
+    public int IdleHideSeconds { get; set; } = 8;
+
+    /// <summary>是否显示上下文占用百分比</summary>
+    public bool ShowContext { get; set; } = true;
+
+    /// <summary>是否显示会话标题</summary>
+    public bool ShowTitle { get; set; } = true;
+
+    /// <summary>是否为已结束的一轮短暂播报"完成"（秒，0 = 关闭）</summary>
+    public int DoneFlashSeconds { get; set; } = 5;
+
+    /// <summary>
+    /// 同时最多显示几条 DSH 岛。DSH 可开多个会话并发工作，但灵动岛最多只能舒服地
+    /// 放 5 条（1 胶囊 + 4 球体），全被 DSH 占满会挤掉通知/媒体。
+    /// 超出的会话按"最近活动"排序后丢弃（仍在工作，只是不显示）。
+    /// </summary>
+    public int MaxIslands { get; set; } = 3;
+}
+
 public sealed class GeneralSettings
 {
     public bool LaunchOnStartup { get; set; }
@@ -180,4 +245,13 @@ public sealed class GeneralSettings
     public bool OpenSettingsOnStart { get; set; } = true;
     /// <summary>System | On | Off</summary>
     public string ReduceMotion { get; set; } = "System";
+
+    // ---- 自动更新 ----
+    /// <summary>启动时自动检查更新</summary>
+    public bool CheckUpdateOnStart { get; set; } = true;
+    /// <summary>
+    /// 发现新版本后自动下载并安装（无需确认）。
+    /// 关闭时只在设置页显示「有新版本」，由用户点按钮更新。
+    /// </summary>
+    public bool AutoInstallUpdate { get; set; }
 }

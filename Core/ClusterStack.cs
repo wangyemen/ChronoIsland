@@ -98,9 +98,10 @@ public sealed class ClusterStack
         // 【不要写死 176】各卡内容差异很大（媒体卡 ~150 / 通知卡可 3 行正文），
         // 写死会导致内容少的卡底部留一大块空白、内容多的卡被裁切。
         // 上下限按缩放同步放大，保持"缩放后仍是同一张卡"的观感
-        double scale = IslandMetrics.Scale <= 0 ? 1.0 : IslandMetrics.Scale;
-        double minH = IslandMetrics.CardMinHeight * scale;
-        double maxH = IslandMetrics.CardMaxHeight * scale;
+        // MeasuredCardHeight 已是"未缩放的内容需求"，缩放由渲染端施加，
+        // 因此这里上下限也必须用未缩放口径，否则会二次缩放。
+        double minH = IslandMetrics.CardMinHeight;
+        double maxH = IslandMetrics.CardMaxHeight;
         double ch = card
             ? Math.Clamp(active.MeasuredCardHeight > 0 ? active.MeasuredCardHeight : minH,
                          minH, maxH)

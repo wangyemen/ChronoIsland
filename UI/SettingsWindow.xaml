@@ -286,6 +286,13 @@
                                         <TextBlock Text="系统状态" VerticalAlignment="Center"/>
                                     </StackPanel>
                                 </ListBoxItem>
+                                <ListBoxItem Tag="dsh">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="&#xE945;" FontFamily="Segoe MDL2 Assets" FontSize="13"
+                                                   Width="18" VerticalAlignment="Center"/>
+                                        <TextBlock Text="DeepSeek Harness" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </ListBoxItem>
                             </ListBox>
 
                             <TextBlock Text="外观" FontSize="10" Foreground="{DynamicResource TextTertiary}"

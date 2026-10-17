@@ -38,3 +38,14 @@ OR PERFORMANCE OF THIS SOFTWARE.
 
 本项目通过 `Windows.Media.Control` 的 **GlobalSystemMediaTransportControlsSession (GSMTC)**
 读取系统媒体会话并发送控制指令，属于 Windows 运行时公开 API，不含第三方代码分发。
+
+## jsDelivr（备用下载源）
+
+自动更新流程（`Core/Updater.cs`）优先读取 `raw.githubusercontent.com` 上的 `version.txt`，
+失败时回退到 jsDelivr 等价地址；release 资产下载失败时同样自动回退 jsDelivr 的 `gh-releases`
+直链。国内网络下 `github.com` 资产链经常连不上，jsDelivr 作为备选保证更新可用。
+
+- 项目：<https://www.jsdelivr.com>
+- 仓库：<https://github.com/jsdelivr/jsdelivr>
+- 用途：读 `version.txt`（`gh/` 前缀）+ 下载 GitHub Releases 资产（`gh-releases/` 前缀）
+

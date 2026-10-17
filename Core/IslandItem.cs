@@ -46,7 +46,14 @@ public sealed class IslandItem
     /// <summary>到达该时刻后自动收起（媒体暂停时设置）</summary>
     public DateTime? HideAt { get; set; }
     public string Kind => _ev.Kind;
-    /// <summary>当前渲染的内容形态："pill" | "card"</summary>
+    /// <summary>
+    /// 当前渲染的内容形态："pill" | "sphere" | "card"。
+    /// 【不变量】它必须始终等于 ContentPresenter 里实际装着的形态。
+    /// Render 用 <c>ContentKey != wantedKey</c> 判断是否需要换装，一旦它与实际内容脱节
+    /// （例如把胶囊内容装进 role 为 Sphere 的 item 却没改这个字段），换装守卫会认为
+    /// "已经是对的"而永不再修 —— 所有就地重建内容的代码都必须走
+    /// <c>IslandWindow.BuildContentFor()</c>，由它统一同步本字段。
+    /// </summary>
     public string ContentKey { get; set; } = "pill";
 
     /// <summary>悬停等待期的透明度系数（1.0 = 正常，&lt;1 = 半透明提示可穿透）</summary>

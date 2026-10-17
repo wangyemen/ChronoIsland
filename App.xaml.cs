@@ -45,6 +45,31 @@ public partial class App : System.Windows.Application
         SingleInstance?.ShowSettingsRequested += () =>
             Dispatcher.InvokeAsync(() => _tray?.OpenSettings(CurrentSettings));
 
+        // 启动后检查更新（延迟 8s，避开启动入场队列与首屏渲染）
+        if (CurrentSettings.General.CheckUpdateOnStart)
+        {
+            _ = System.Threading.Tasks.Task.Run(async () =>
+            {
+                try
+                {
+                    await System.Threading.Tasks.Task.Delay(TimeSpan.FromSeconds(8));
+                    var info = await Core.Updater.FetchLatestAsync();
+                    if (info == null) return;
+                    if (!Core.Updater.IsNewer(info.Version, Core.Updater.CurrentVersion))
+                    {
+                        LogInfo("Update", $"已是最新版本 {Core.Updater.CurrentVersion}");
+                        return;
+                    }
+                    LogInfo("Update", $"发现新版本 {info.Version}（当前 {Core.Updater.CurrentVersion}）");
+                    if (!CurrentSettings.General.AutoInstallUpdate) return;   // 未开启则只在设置页提示
+
+                    var ok = await Core.Updater.DownloadAndApplyAsync(info);
+                    if (ok) await Dispatcher.InvokeAsync(() => Shutdown());
+                }
+                catch (Exception ex) { Log("Update", ex); }
+            });
+        }
+
         // 启动后打开设置窗口（让用户能立刻配置；托盘菜单也可随时打开）
         if (CurrentSettings.General.OpenSettingsOnStart)
         {

@@ -7,7 +7,7 @@ namespace ChronoIsland.Sources;
 
 /// <summary>
 /// 歌词源：跟随当前媒体曲目，异步取歌词并提供按时间查当前行。
-/// 设计文档：docs/design-lyrics-0.0.1.md
+/// 设计文档：designWeb/docs/design-lyrics-0.0.1.md
 /// 要点：换歌才发起查询；查询在后台线程不阻塞渲染；当前行二分查找。
 /// </summary>
 public sealed class LyricsSource : IDisposable
@@ -21,6 +21,16 @@ public sealed class LyricsSource : IDisposable
     private CancellationTokenSource? _cts;
     private volatile bool _loading;
 
+    /// <summary>
+    /// 上次查询失败的 UTC 时间（同名曲目去重用）。
+    /// 【为什么需要】以前 UpdateTrack 只比「标题+艺人」，同名就直接 return，
+    /// 于是一旦某次查询失败（超预算/全部源未命中），**同一首歌再也不会重试**，
+    /// 表现为「这首歌一直没歌词，切歌才恢复」。
+    /// 现在失败后隔一小段时间允许重试，让间歇性可用的源有机会补上。
+    /// </summary>
+    private DateTime _lastFailAt = DateTime.MinValue;
+    private static readonly TimeSpan RetryAfterFail = TimeSpan.FromSeconds(30);
+
     public LyricResult? Current { get { lock (_lock) return _cur; } }
     public bool IsLoading => _loading;
     public event Action? Changed;
@@ -32,8 +42,16 @@ public sealed class LyricsSource : IDisposable
         if (string.IsNullOrWhiteSpace(ct)) return;
         lock (_lock)
         {
-            if (ct == _curTitle && at == _curArtist) return;
-            _curTitle = ct; _curArtist = at; _cur = null;
+            if (ct == _curTitle && at == _curArtist)
+            {
+                // 同名曲目：已有歌词 → 忽略；查询中 → 忽略；
+                // 上次失败且仍在冷却窗口内 → 忽略；否则放行重试。
+                bool hasLyrics = _cur is { Success: true, Lines.Count: > 0 };
+                if (hasLyrics || _loading) return;
+                if (DateTime.UtcNow - _lastFailAt < RetryAfterFail) return;
+            }
+            _curTitle = ct; _curArtist = at;
+            if (_cur is null || !_cur.Success) _cur = null;
         }
         _cts?.Cancel();
         _cts = new CancellationTokenSource();
@@ -48,7 +66,13 @@ public sealed class LyricsSource : IDisposable
                 var r = await _provider.GetAsync(ct, at, album, durationMs, token).ConfigureAwait(false);
                 lock (_lock)
                 {
-                    if (ct == _curTitle && at == _curArtist) _cur = r;
+                    if (ct == _curTitle && at == _curArtist)
+                    {
+                        _cur = r;
+                        // 记下失败时刻：同名曲目在冷却后可再次重试
+                        if (r is not { Success: true, Lines.Count: > 0 })
+                            _lastFailAt = DateTime.UtcNow;
+                    }
                 }
                 _loading = false;
                 Changed?.Invoke();

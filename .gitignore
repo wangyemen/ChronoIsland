@@ -10,15 +10,16 @@ obj/
 *.log
 
 # ===== 开源发布时排除 =====
-# 构建产物与本地运行时
+# 构建产物与本地运行时（publish.old/ 是发布时留的上一版备份，同样不入库）
 publish/
+publish.old/
+publish.new/
 .dotnet/
 bin/
 obj/
 
-# 网站/设计页面（designWeb 不开源，根目录下的旧副本同理）
+# 网站/设计页面 / 设计文档（designWeb 不开源，docs 也已迁入其中）
 designWeb/
-样式.html
 
 # 本地诊断脚本
 *.ps1

@@ -39,7 +39,14 @@ public partial class IslandWindow : Window
     private Sources.UsageTracker? _usage;
     private Sources.MediaSource? _media;
     private Sources.SysStateSource? _sys;   // 键位 + 会话解锁（docs §5.5）
-    private static readonly double s_progressTrackWidth = 388;
+    private Sources.DshSource? _dsh;        // DeepSeek Harness 工作状态（只读投影缓存）
+    /// <summary>
+    /// 进度条轨道的"未缩放"排版宽度。
+    /// 卡片内容在未缩放坐标系里排版（CardWidth 宽 - 左右各 16 内边距），
+    /// 由 WrapWithClose 的 LayoutTransform 整体放大到外框，因此这里必须用未缩放口径。
+    /// 之前写死 388 恰好等于这个值，但 CardWidth 一旦变化就会失配；改为按公式推导。
+    /// </summary>
+    private static double ProgressTrackWidth => Math.Max(40, IslandMetrics.CardWidth - 32);
 
 
     /// <summary>展开卡歌词区高度（当前行 + 上下各 3 行 = 7 行），超出用滚动条</summary>
@@ -74,6 +81,7 @@ public partial class IslandWindow : Window
     {
         public Border? ProgressFill;
         public Border? Track;
+        /// <summary>轨道宽度（未缩放排版口径，每帧由 ProgressTrackWidth 赋值）</summary>
         public double TrackWidth = 388;
         public TextBlock? PosText;
         public TextBlock? RemainText;
@@ -211,22 +219,51 @@ public partial class IslandWindow : Window
         cur.Text = curText;
         if (next != null) { next.Text = nextText; next.Visibility = nextText.Length > 0 ? Visibility.Visible : Visibility.Collapsed; }
 
-        // 当前行超宽时水平滚动（单向一轮，停留-滚动-停留）
-        cur.RenderTransform = Transform.Identity;
-        if (!_settings.Media.LyricAutoScroll) return;
+        // 【逐行滚动】三行都不再用省略号（见 BuildMediaCard 的说明），
+        // 所以每一行都要各自把超出部分滚出来，否则上下文行会被直接裁掉。
+        // 先统一清掉旧动画，再按需重新挂。
         double avail = clip.ActualWidth;
-        if (avail <= 0) return;
-        double need = MeasureText(curText, 13.5, true);
-        if (need <= avail - 1) return;
-        double shift = need - avail + 8;
+        ResetLineScroll(prev);
+        ResetLineScroll(cur);
+        ResetLineScroll(next);
+        if (!_settings.Media.LyricAutoScroll || avail <= 0) return;
+
+        ScrollLineIfNeeded(prev, prevText, 11.5, avail);
+        ScrollLineIfNeeded(cur, curText, 13.5, avail);
+        ScrollLineIfNeeded(next, nextText, 11.5, avail);
+    }
+
+    /// <summary>清掉一行的横向滚动动画与位移（换行时调用）。</summary>
+    private static void ResetLineScroll(TextBlock? tb)
+    {
+        if (tb == null) return;
+        if (tb.RenderTransform is TranslateTransform tx)
+        {
+            tx.BeginAnimation(TranslateTransform.XProperty, null);
+            tx.X = 0;
+        }
+    }
+
+    /// <summary>
+    /// 单行需要时挂上「停留-滚动-停留」的横向动画。
+    /// 判定依据是文本实测宽度 vs 可用宽（由调用方传入，避免每行各量一次容器）。
+    /// </summary>
+    private void ScrollLineIfNeeded(TextBlock? tb, string text, double fontSize, double avail)
+    {
+        if (tb == null || string.IsNullOrEmpty(text) || avail <= 0) return;
+        double need = MeasureText(text, fontSize, fontSize > 12);
+        if (need <= avail - 1) return;      // 放得下 → 不滚
+
+        double shift = need - avail + 8;    // 末尾留 8px 呼吸，保证最后一个字可见
         double sec = Math.Clamp(shift / 35.0, 2.0, 8.0);
         var tx = new TranslateTransform();
-        cur.RenderTransform = tx;
+        tb.RenderTransform = tx;
         var anim = new System.Windows.Media.Animation.DoubleAnimationUsingKeyFrames
         {
             Duration = TimeSpan.FromSeconds(sec + 2.4),
             RepeatBehavior = System.Windows.Media.Animation.RepeatBehavior.Forever
         };
+        // 停留 12% → 滚到 88% → 停留到底（单向一轮，便于读完一整句）
         anim.KeyFrames.Add(new System.Windows.Media.Animation.LinearDoubleKeyFrame(0,
             System.Windows.Media.Animation.KeyTime.FromPercent(0)));
         anim.KeyFrames.Add(new System.Windows.Media.Animation.LinearDoubleKeyFrame(0,
@@ -238,6 +275,60 @@ public partial class IslandWindow : Window
         tx.BeginAnimation(TranslateTransform.XProperty, anim);
     }
 
+
+    /// <summary>
+    /// 展开卡标题：宽度不够时横向滚动（停留 → 单向滚到底 → 停留）。
+    ///
+    /// 【为什么改成滚动而不是省略号】
+    /// 标题列与歌词列现在各占一半（1* : 1*），长歌名放不下。
+    /// 以前是 CharacterEllipsis 截断（"United States of Eurasia (..."），
+    /// 看不到完整歌名。改成跑马灯后能看全，且不占用更多宽度。
+    ///
+    /// 只在标题变化时重算并重启动画（用签名比对），避免每帧重启导致抖动。
+    /// </summary>
+    private void ApplyCardTitleScroll()
+    {
+        var tb = _cardTitleText;
+        var clip = _cardTitleClip;
+        if (tb == null || clip == null) return;
+
+        var text = tb.Text ?? "";
+        if (text == _cardTitleSig) return;   // 标题没变，保持现有动画
+        _cardTitleSig = text;
+
+        // 重置上一次的动画与位移
+        tb.RenderTransform = Transform.Identity;
+        if (string.IsNullOrEmpty(text)) return;
+
+        double avail = clip.ActualWidth;
+        // 布局尚未完成时 ActualWidth 为 0：留到下一帧再量，避免误判"放得下"
+        if (avail <= 0) { _cardTitleSig = ""; return; }
+
+        double need = MeasureText(text, 14, true);
+        if (need <= avail - 1) return;       // 放得下 → 不滚动
+
+        // 超出部分 + 右侧留白，滚到末尾时能看到最后一个字
+        double shift = need - avail + 8;
+        // 速度 ~35 DIP/s，2~8 秒走完一轮（与歌词滚动同一手感）
+        double sec = Math.Clamp(shift / 35.0, 2.0, 8.0);
+        var tx = new TranslateTransform();
+        tb.RenderTransform = tx;
+        var anim = new System.Windows.Media.Animation.DoubleAnimationUsingKeyFrames
+        {
+            Duration = TimeSpan.FromSeconds(sec + 2.4),
+            RepeatBehavior = System.Windows.Media.Animation.RepeatBehavior.Forever
+        };
+        // 停留 12% → 滚动到 88% → 停留到底（与歌词滚动同一节奏）
+        anim.KeyFrames.Add(new System.Windows.Media.Animation.LinearDoubleKeyFrame(0,
+            System.Windows.Media.Animation.KeyTime.FromPercent(0)));
+        anim.KeyFrames.Add(new System.Windows.Media.Animation.LinearDoubleKeyFrame(0,
+            System.Windows.Media.Animation.KeyTime.FromPercent(0.12)));
+        anim.KeyFrames.Add(new System.Windows.Media.Animation.LinearDoubleKeyFrame(-shift,
+            System.Windows.Media.Animation.KeyTime.FromPercent(0.88)));
+        anim.KeyFrames.Add(new System.Windows.Media.Animation.LinearDoubleKeyFrame(-shift,
+            System.Windows.Media.Animation.KeyTime.FromPercent(1.0)));
+        tx.BeginAnimation(TranslateTransform.XProperty, anim);
+    }
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
@@ -300,6 +391,11 @@ public partial class IslandWindow : Window
         _sys = new Sources.SysStateSource();
         _sys.Configure(_settings);
         _sys.Start(_bus);
+
+        // DeepSeek Harness 工作状态：只读其投影缓存（明文 JSON），不停 DSH 侧任何代码
+        _dsh = new Sources.DshSource();
+        _dsh.Configure(_settings);
+        _dsh.Start(_bus);
 
         Native.FullscreenDetector.FullscreenChanged += OnFullscreenChanged;
         Native.FullscreenDetector.Start();
@@ -460,10 +556,15 @@ public partial class IslandWindow : Window
             _startupQueue.RemoveAt(bestIdx);
             App.LogInfo("Island", $"启动入场：{ev.Kind}/{ev.SourceKey}（剩 {_startupQueue.Count} 条）");
             // 媒体：入栈时同步曲目给歌词源
+            // 【与 UpdateItem 同一道闸】只有音乐播放器才查歌词。启动队列是独立路径，
+            // 以前漏了这道判断，浏览器里放的视频也会被拿去查歌词（白费请求且可能匹配错歌）。
             if (ev.Kind == "media" && ev.Payload is Sources.MediaSnapshot ms0)
             {
-                int d0 = (int)(Math.Max(0, ms0.EndTicks) / TimeSpan.TicksPerMillisecond);
-                _lyrics.UpdateTrack(ms0.Title, ms0.Artist, ms0.Album, d0);
+                if (Sources.MediaSourcePolicy.IsMusicPlayer(ms0.SourceId))
+                {
+                    int d0 = (int)(Math.Max(0, ms0.EndTicks) / TimeSpan.TicksPerMillisecond);
+                    _lyrics.UpdateTrack(ms0.Title, ms0.Artist, ms0.Album, d0);
+                }
             }
 
             AdmitIsland(ev);
@@ -535,6 +636,17 @@ public partial class IslandWindow : Window
                 return;
             }
 
+            // DSH 空闲收起：与媒体同一套约定（Kind="dsh-retract"，Id 仍为 "dsh"）。
+            // 必须在"同 Id 就地更新"之前判断，否则会被当成普通刷新而永远留在岛上。
+            if (ev.Kind == "dsh-retract")
+            {
+                // 多任务：每条 DSH 会话有独立 Id（"dsh:<会话id>"），
+                // 因此按事件自带的 Id 精确收起，不能写死 "dsh"。
+                var old = _stack.Items.FirstOrDefault(i => i.Event.Id == ev.Id);
+                if (old != null && !old.IsDying) Dismiss(old);
+                return;
+            }
+
             // 启动阶段：先进队列按优先级逐条入场，避免一次性全部弹出
             if (StartupQueueActive)
             {
@@ -600,6 +712,10 @@ public partial class IslandWindow : Window
     private TextBlock? _pillLyricText;
     private Grid? _pillLyricRow;
     private FrameworkElement? _pillLyricHost;
+    /// <summary>媒体胶囊的根 Grid（换句时同步第 1 列宽度）</summary>
+    private Grid? _pillGrid;
+    /// <summary>媒体胶囊的文字列 StackPanel（换句时同步其 Width）</summary>
+    private FrameworkElement? _pillTextCol;
     private string _lastLyricText = "";
     private double _lyricScrollShift;      // 需要滚动时的位移
     private bool _lyricNeedScroll;
@@ -613,6 +729,13 @@ public partial class IslandWindow : Window
     private DateTime _lyricUserScrollAt = DateTime.MinValue;
     /// <summary>卡片内容滚动宿主（超出高度上限时滚动而非裁切）</summary>
     private ScrollViewer? _cardScrollHost;
+    /// <summary>展开卡：标题（放不下时横向滚动，占宽上限 = 整卡一半）</summary>
+    private TextBlock? _cardTitleText;
+    /// <summary>标题的裁剪宿主（滚动时超出的部分靠它裁掉）</summary>
+    private Grid? _cardTitleClip;
+    /// <summary>标题滚动签名（标题变了才重算，避免每帧重启动画）</summary>
+    private string _cardTitleSig = "";
+
     /// <summary>展开卡：标题右侧的歌词控件（含横向滚动）</summary>
     private TextBlock? _cardLyricText;
     private TextBlock? _cardLyricPrev;
@@ -641,10 +764,12 @@ public partial class IslandWindow : Window
     /// <summary>
     /// 图库自检：构建一张详情卡但不进入集群（供 IconGallery 离屏渲染用）。
     /// </summary>
-    public FrameworkElement ProbeCard(string kind, ThemeTokens? themeOverride = null)
+    public FrameworkElement ProbeCard(string kind, ThemeTokens? themeOverride = null,
+        Sources.MediaSnapshot? mediaOverride = null)
     {
         object snap = kind switch
         {
+            "media" when mediaOverride != null => mediaOverride,
             "camera" => new Sources.CameraSnapshot(true, "HD Webcam"),
             "unlock" => new Sources.UnlockSnapshot(720, DateTime.Now, IntPtr.Zero),
             "media" => new Sources.MediaSnapshot("Spotify", "Spotify", "夜航西飞", "Sodagreen", "动感生活", true, 32, 24_000_000L, 304_000_000L),
@@ -665,7 +790,9 @@ public partial class IslandWindow : Window
         if (themeOverride != null) AppTheme.SetCurrentForProbe(themeOverride);
         try
         {
-            return WrapWithClose(BuildCard(ev));
+            // BuildCard 内部已经 WrapWithClose 过，这里不要再包一层：
+            // 重复包裹会让关闭按钮叠两次、且测量口径与真实渲染不一致。
+            return BuildCard(ev)!;
         }
         finally
         {
@@ -824,7 +951,9 @@ public partial class IslandWindow : Window
                 ds.Opacity = t.ShadowOpacity;
 
             // 内容重建（文字/图标颜色来自 token）
-            var content = BuildContent(item.Event);
+            // 【必须按当前形态重建】不能一律 BuildContent —— 那会把侧列球体灌成胶囊，
+            // 且 ContentKey 不同步，Render 的换装守卫会认为"已经对了"而永不再修。
+            var content = BuildContentFor(item);
             if (content != null && b.Child is ContentPresenter cp) cp.Content = content;
         }
         NeckPath.Fill = t.IslandTop;
@@ -863,10 +992,11 @@ public partial class IslandWindow : Window
 
         if (needRebuild)
         {
-            // 【关键】按当前形态重建：展开态必须继续用卡片模板，
-            // 否则暂停事件会把进度条/控制按钮打回胶囊（表现为"暂停后按钮消失"）
-            bool keepCard = item.ContentKey == "card";
-            var content = keepCard ? BuildCard(ev) : BuildContent(ev);
+            // 【关键】按当前形态重建：展开态继续用卡片模板、侧列球体继续用球体模板。
+            // 仅用 ContentKey == "card" 判断是不够的 —— 那会把球体 item 当成胶囊重建，
+            // 于是球体里被塞进一个胶囊（图标偏右 6px、文字/波形溢出球外）。
+            // BuildContentFor 会重新判定形态并同步 ContentKey。
+            var content = BuildContentFor(item);
             if (content != null && item.Visual.Child is ContentPresenter cp)
                 cp.Content = content;
         }
@@ -989,31 +1119,53 @@ public partial class IslandWindow : Window
         return pos / TimeSpan.TicksPerMillisecond;
     }
 
-    private double cwForCard() => IslandMetrics.CardWidth;
-
     /// <summary>
-    /// 在与真实布局相同的宽度下离屏 Measure 一张详情卡，返回它想要的高度。
-    /// 离屏容器宽高都设为 double.PositiveInfinity，让 WPF 按内容自然撑开。
-    /// 夹在 [CardMinHeight, CardMaxHeight]，避免极端内容把卡撑爆或塌成一坨。
+    /// 展开卡内容的排版宽度（= 外框真实宽度 = CardWidth × Scale）。
+    /// 交给 MeasureCardContent 时不能预先除以 Scale：WPF 自己会为 LayoutTransform
+    /// 做这步除法，重复除会让内容按 CardWidth/Scale² 排版，导致右侧留白。
     /// </summary>
+    private double cwForCard() =>
+        IslandMetrics.CardWidth * (IslandMetrics.Scale <= 0 ? 1.0 : IslandMetrics.Scale);
+
     /// <summary>
     /// 实测卡片内容所需高度（未缩放逻辑值）。
     /// 调用方必须传入【尚未挂载到视觉树】的元素 —— 已挂载的元素其
     /// DesiredSize.Height 会被父级拉伸，测出来的不是内容真实需求。
+    ///
+    /// 【两个必须做对的点】
+    /// 1) 用【定宽容器】Measure，而不是直接 Measure content：
+    ///    卡片根节点是 StackPanel，其 DesiredSize 取自子元素自然宽度（实测仅 202），
+    ///    而非外框给定的 CardWidth(420)。直接测会让文字按 202 宽换行、撑出 174 高；
+    ///    真实渲染时被拉伸到 420 宽其实只要约 116 —— 差值正是底部那片空白。
+    /// 2) LayoutTransform 由 WPF 自行处理：它会把约束除以缩放比再交给子树，
+    ///    并把 DesiredSize 再乘回缩放比。因此约束直接传外框真实宽度
+    ///    （CardWidth × Scale），结果再除以 Scale 折回未缩放口径。
     /// </summary>
     private static double MeasureCardContent(FrameworkElement content, double width)
     {
         try
         {
-            content.Measure(new Size(Math.Max(1, width), double.PositiveInfinity));
-            var h = content.DesiredSize.Height;
-            if (double.IsNaN(h) || double.IsInfinity(h) || h <= 0) return 0;
-            // 【口径必须与渲染端一致】渲染时是 b.Height = item.Height.Value × Scale，
-            // 所以这里也要乘 scale，否则卡片会多出 (scale-1)×内容高 的空白。
-            double sc = IslandMetrics.Scale <= 0 ? 1.0 : IslandMetrics.Scale;
-            return Math.Clamp(h * sc,
-                              IslandMetrics.CardMinHeight * sc,
-                              IslandMetrics.CardMaxHeight * sc);
+            double sc = 1.0;
+            if (content.LayoutTransform is ScaleTransform sct && sct.ScaleX > 0)
+                sc = sct.ScaleX;
+
+            double w = Math.Max(1, width);
+            var probe = new Border { Width = w, Child = content };
+            try
+            {
+                probe.Measure(new Size(w, double.PositiveInfinity));
+                double h = probe.DesiredSize.Height / sc;
+                if (double.IsNaN(h) || double.IsInfinity(h) || h <= 0) return 0;
+                // 返回未缩放口径：缩放由渲染端施加（b.Height = item.Height × Scale），
+                // 这里再乘一次就会被缩放两次，卡片过高、下方重新出现空白。
+                return Math.Clamp(h, IslandMetrics.CardMinHeight, IslandMetrics.CardMaxHeight);
+            }
+            finally
+            {
+                // 解绑：调用方随后要把 content 挂到 ContentPresenter 上，
+                // WPF 不允许元素同时有两个父级。
+                probe.Child = null;
+            }
         }
         catch { return 0; }
     }
@@ -1023,7 +1175,7 @@ public partial class IslandWindow : Window
 
 
 
-    private FrameworkElement WrapWithClose(FrameworkElement body)
+    private FrameworkElement WrapWithClose(FrameworkElement body, ScaleTransform? contentScale = null)
     {
         // 【自适应高度 + 上限 + 滚动条】
         // 卡片高度由内容实测决定（自适应），但上限受 CardMaxHeight 约束；
@@ -1031,11 +1183,12 @@ public partial class IslandWindow : Window
         // —— 之前通知卡底部按钮被裁、歌词看不见，就是硬裁切造成的。
         // 滚动条：默认 Hidden（不占宽度、不显示），只在鼠标进入卡片时才细显示。
         // 之前用 Auto，Windows 默认滚动条又粗又显眼，横在卡片里很难看。
-        // 【不套外层 ScrollViewer】
-        // 给整张卡片套 ScrollViewer 会造成「两层滚动嵌套」：
-        // 外层（卡片）与内层（歌词区）争抢滚轮，表现为"只能下滚、上滚没反应"。
-        // 现在卡片高度按屏幕动态上限自适应，内容超限时由内层（歌词区）自己滚。
+        // 【缩放放在 host 上】body 与关闭按钮一起按 Scale 放大，
+        // 于是 16/14 的内边距、圆角、进度条宽度全部在未缩放坐标系里自洽，
+        // 视觉上正好铺满 item.Width × Scale 的外框（否则下方会留大片空白）。
+        // contentScale 由 BuildCard 传入（已构造好，供 MeasureCardContent 反推口径）。
         var host = new Grid();
+        if (contentScale != null) host.LayoutTransform = contentScale;
         host.Children.Add(body);
         host.Children.Add(BuildCloseButton(AppTheme.Current));
         return host;
@@ -1062,6 +1215,9 @@ public partial class IslandWindow : Window
         _cardLyricText = null;             // 歌词引用作废（卡片会被重建）
         _cardLyricPanel = null;
         _cardLyricClip = null;
+        _cardTitleText = null;             // 标题引用作废（同上）
+        _cardTitleClip = null;
+        _cardTitleSig = "";
         _cardScrollHost = null;
         _cardLyricSig = "";
         var body = ev.Kind switch
@@ -1070,9 +1226,174 @@ public partial class IslandWindow : Window
             "sys" when ev.Payload is Sources.SysSnapshot snap => BuildSysCard(snap),
             "camera" when ev.Payload is Sources.CameraSnapshot cam => BuildCameraCard(cam),
             "unlock" when ev.Payload is Sources.UnlockSnapshot snap => BuildUnlockCard(snap),
+            "usage" => BuildUsageCard(ev),
+            "dsh" when ev.Payload is Sources.DshSnapshot ds => BuildDshCard(ds),
             _ => BuildNotificationCard(ev)
         };
-        return body == null ? null : WrapWithClose(body);
+        if (body == null) return null;
+        // 【卡片专用缩放】详情卡内容按【未缩放】的 CardWidth 排版，再整体放大 Scale。
+        // 之前只放大外框（b.Width = item.Width × Scale）而内容仍按 1.0 排版，导致：
+        //   ① 内容只占外框的 1/Scale（1.5 缩放下约 67%），下方留下一大片空白；
+        //   ② 内容按未缩放宽度排版却要撑满被放大的外框，百分比 / 宽度全部失配 ——
+        //      进度条按写死的 388px 算比例，实际轨道已变成 598px，最多只能走到 64.9%，
+        //      表现为"进度条永远走不满"。
+        // 改用 LayoutTransform 后内容与外框同比缩放，宽度、比例、截断重新自洽。
+        // 变换挂在 WrapWithClose 返回的 host 上，body 自身不带变换，
+        // 这样 MeasureCardContent 只需按 host 的变换反推排版宽度，逻辑单一。
+        double sc = IslandMetrics.Scale <= 0 ? 1.0 : IslandMetrics.Scale;
+        return WrapWithClose(body, new ScaleTransform(sc, sc));
+    }
+
+    /// <summary>
+    /// DSH 工作状态详情卡：状态行 + 进度/上下文指标 + 会话标题 + [打开 DSH][收起]。
+    /// 不显示"打开应用"的 COM 激活路径 —— DSH 不是可被 COM 激活的应用，
+    /// 直接跳它的 Web GUI 更符合直觉。
+    /// </summary>
+    private FrameworkElement BuildDshCard(Sources.DshSnapshot snap)
+    {
+        var t = AppTheme.Current;
+        var root = new StackPanel { Margin = new Thickness(16, 14, 16, 14) };
+        bool working = snap.Working;
+
+        // 头部：状态图标 + 标题 + 副标题
+        var head = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+        head.Children.Add(new Border
+        {
+            Margin = new Thickness(0, 0, 10, 0),
+            Child = Native.SvgIcons.CreateKeycap(
+                working ? "sparkles" : "check", 26, working, t)
+        });
+        var hi = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+        hi.Children.Add(new TextBlock
+        {
+            Text = (snap.IsSubagent ? "DSH 子代理" : "DeepSeek Harness")
+                + (working ? " 工作中" : " 已完成"),
+            FontSize = 12, FontWeight = FontWeights.SemiBold, Foreground = t.TextPrimary
+        });
+        hi.Children.Add(new TextBlock
+        {
+            Text = (snap.IsSubagent && !string.IsNullOrWhiteSpace(snap.SubagentLabel)
+                    ? snap.SubagentLabel + " · "
+                    : "")
+                + (working
+                    ? snap.Stepping
+                        ? $"第 {Math.Max(snap.Turn, 1)} 轮 · 第 {snap.Step} 步"
+                        : $"第 {Math.Max(snap.Turn, 1)} 轮 · 执行中"
+                    : $"第 {Math.Max(snap.Turn, 1)} 轮 · 共 {snap.Steps} 步"),
+            FontSize = 11, Foreground = t.TextTertiary
+        });
+        head.Children.Add(hi);
+        // 子代理徽标：卡片里同样要能看出这是子代理而不是主会话
+        if (snap.IsSubagent)
+            head.Children.Add(new Border
+            {
+                Margin = new Thickness(10, 0, 0, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+                Child = BuildSubagentTag(t, snap.SubagentMode)
+            });
+        root.Children.Add(head);
+
+        // 指标矩阵：轮次 / 步数 / 上下文
+        var matrix = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 12, 0, 0) };
+        void AddTile(string label, string value, bool last)
+        {
+            var tile = new Border
+            {
+                Width = 104, Height = 60, CornerRadius = new CornerRadius(13),
+                Background = t.RowSurface, BorderBrush = t.Stroke,
+                BorderThickness = new Thickness(1),
+                Margin = new Thickness(0, 0, last ? 0 : 8, 0)
+            };
+            var sp = new StackPanel { Margin = new Thickness(11, 9, 11, 9) };
+            sp.Children.Add(new TextBlock
+            { Text = label, FontSize = 10.5, Foreground = t.TextTertiary });
+            sp.Children.Add(new TextBlock
+            {
+                Text = value, FontSize = 16, FontWeight = FontWeights.Bold,
+                Foreground = t.TextPrimary, Margin = new Thickness(0, 3, 0, 0),
+                TextTrimming = TextTrimming.CharacterEllipsis
+            });
+            tile.Child = sp;
+            matrix.Children.Add(tile);
+        }
+        AddTile("轮次", Math.Max(snap.Turn, 1).ToString(), false);
+        AddTile("步数", working ? snap.Step.ToString() : snap.Steps.ToString(), false);
+        AddTile("上下文", snap.ContextWindow > 0 ? snap.ContextPercent + "%" : "—", true);
+        root.Children.Add(matrix);
+
+        // 上下文进度条
+        if (snap.ContextWindow > 0)
+        {
+            var track = new Border
+            {
+                Height = 5, CornerRadius = new CornerRadius(3), Background = t.Track,
+                Margin = new Thickness(0, 10, 0, 0)
+            };
+            var grid = new Grid();
+            grid.Children.Add(track);
+            var fill = new Border
+            {
+                Height = 5, CornerRadius = new CornerRadius(3),
+                Background = snap.ContextPercent >= 85 ? t.Danger
+                           : snap.ContextPercent >= 60 ? t.Warning : t.AccentGradient,
+                HorizontalAlignment = HorizontalAlignment.Left,
+                Width = Math.Max(2, 388 * snap.ContextRatio)
+            };
+            grid.Children.Add(fill);
+            root.Children.Add(grid);
+            root.Children.Add(new TextBlock
+            {
+                Text = $"{snap.SurfaceTokens:N0} / {snap.ContextWindow:N0} tokens",
+                FontSize = 10.5, Foreground = t.TextTertiary, Margin = new Thickness(0, 5, 0, 0)
+            });
+        }
+
+        // 会话标题
+        if (!string.IsNullOrWhiteSpace(snap.Title))
+            root.Children.Add(new TextBlock
+            {
+                Text = snap.Title,
+                FontSize = 12.5, Foreground = t.TextSecondary,
+                TextWrapping = TextWrapping.Wrap, MaxHeight = 40,
+                Margin = new Thickness(0, 12, 0, 0)
+            });
+
+        // 模型
+        if (!string.IsNullOrWhiteSpace(snap.Model))
+            root.Children.Add(new TextBlock
+            {
+                Text = "模型 " + snap.Model,
+                FontSize = 10.5, Foreground = t.TextTertiary, Margin = new Thickness(0, 6, 0, 0)
+            });
+
+        // 按钮行
+        var acts = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 12, 0, 0) };
+        acts.Children.Add(MakeTextButton("打开 DSH", "monitor", t, true, () =>
+        {
+            DismissActive();
+            OpenDshWebUi();
+            return Task.CompletedTask;
+        }));
+        acts.Children.Add(MakeTextButton("收起", "close", t, false, () =>
+        {
+            DismissActive();
+            return Task.CompletedTask;
+        }));
+        root.Children.Add(acts);
+        return root;
+    }
+
+    /// <summary>打开 DSH 的 Web GUI（127.0.0.1:19387）；未运行则什么都不做并记日志。</summary>
+    private static void OpenDshWebUi()
+    {
+        try
+        {
+            var url = Environment.GetEnvironmentVariable("DSH_WEB_URL");
+            if (string.IsNullOrWhiteSpace(url)) url = "http://127.0.0.1:19387";
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url)
+            { UseShellExecute = true });
+        }
+        catch (Exception ex) { App.Log("Dsh", ex); }
     }
 
     /// <summary>键位详情卡（docs §5.5）：Lucide 键帽 + 名称 + [稍后提醒][忽略][键盘设置]</summary>
@@ -1293,9 +1614,16 @@ public partial class IslandWindow : Window
         // 顶部：封面 + 左侧元信息 + 右侧歌词（借用标题右侧空白区，不占额外高度）
         // 布局： [封面] 标题/作者/来源  |  当前行歌词（超出则自动滚动）
         var top = new Grid();
+        // 【布局：封面 | 右侧上下两行】
+        //   上行：标题 + 艺人 + 来源（独占整宽，长歌名放得下）
+        //   下行：歌词（独占整宽，比挤在半边时宽敞）
+        //
+        // 【为什么不再左右分栏】之前试过标题 1/3、歌词 2/3 的左右分栏，
+        // 左右分栏时（标题 1/3 ≈ 107px）像 "Exogenesis: Symphony Pt. 2"（实测 332.9px）
+        // 这种长歌名怎么都放不下，收起态能显示全、展开后反而被压成 "jenesis: Sy"。
+        // 改成上下两行后标题拿回整宽，长歌名不再被压缩；歌词也拿回整宽。
         top.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });   // 封面
-        top.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });   // 标题列
-        top.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) }); // 歌词列
+        top.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) }); // 右侧内容
 
         var coverHost = new Grid { Width = 56, Height = 56, Margin = new Thickness(0, 0, 12, 0) };
         var ic = Native.AppIconExtractor.GetIcon(snap.SourceId);
@@ -1311,57 +1639,88 @@ public partial class IslandWindow : Window
         Grid.SetColumn(coverHost, 0);
         top.Children.Add(coverHost);
 
-        // 标题列限宽：卡片宽 420 时，若标题列 Auto 无限伸展，长标题会把
-        // 歌词列挤到几乎没有宽度。限制在 140px（内部 TextTrimming 截断），
-        // 把省下的宽度全部让给歌词显示区。
+        // 右侧内容容器：上排标题块、下排歌词块，各占整宽。
+        var textArea = new StackPanel
+        {
+            // 【必须撑满】垂直 StackPanel 默认按子元素内容宽收缩；
+            // 不显式 Stretch 的话，titleClip/lyWrap 量到的 ActualWidth 等于内容宽，
+            // 跑马灯会误判"放得下"，超长文本还会溢出卡片右边缘。
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0)
+        };
+
+        // 标题块：独占整行，长歌名放得下；仍保留跑马灯兜底极端长名。
         var meta = new StackPanel
         {
-            VerticalAlignment = VerticalAlignment.Center,
-            MaxWidth = 200
+            VerticalAlignment = VerticalAlignment.Center
         };
-        meta.Children.Add(new TextBlock
+
+        // 标题的裁剪宿主：只有它裁掉溢出部分，滚动才看起来是"跑马灯"而不是溢出。
+        var titleClip = new Grid
+        {
+            ClipToBounds = true,
+            HorizontalAlignment = HorizontalAlignment.Stretch   // 占满整行，裁剪宽度才等于可用宽
+        };
+        var titleText = new TextBlock
         {
             Text = snap.Title, FontSize = 14, FontWeight = FontWeights.SemiBold,
-            Foreground = t.TextPrimary, TextTrimming = TextTrimming.CharacterEllipsis
-        });
+            Foreground = t.TextPrimary,
+            TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.None,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            RenderTransformOrigin = new System.Windows.Point(0, 0.5)
+        };
+        titleClip.Children.Add(titleText);
+        _cardTitleText = titleText;
+        _cardTitleClip = titleClip;
+        _cardTitleSig = "";        // 新元素：强制下一帧重新判定是否需要滚动
+        meta.Children.Add(titleClip);
         if (!string.IsNullOrWhiteSpace(snap.Artist))
             meta.Children.Add(new TextBlock
             { Text = snap.Artist, FontSize = 12, Foreground = t.TextSecondary, Margin = new Thickness(0, 2, 0, 0) });
         meta.Children.Add(new TextBlock
         { Text = snap.SourceName, FontSize = 11, Foreground = t.TextTertiary, Margin = new Thickness(0, 2, 0, 0) });
-        Grid.SetColumn(meta, 1);
-        top.Children.Add(meta);
+        textArea.Children.Add(meta);
 
-        // ---- 歌词列（标题右侧，显示 2~3 行，当前行高亮）----
-        // 利用标题右侧原本的空白，不增加卡片高度，因此永远不会被裁。
-        // 超出宽度时：先按行截断（TextTrimming），必要时整行水平滚动。
+        // ---- 歌词块（标题下方，独占整宽，显示 2~3 行，当前行高亮）----
+        // 与标题左对齐（不再额外缩进），宽度拿满，长歌词有更多可见空间。
+        // 【不能设 HorizontalAlignment.Left】那样 lyWrap 宽度会收缩到内容宽，
+        // ClipToBounds 就按内容宽裁剪，RefreshCardLyric 量到的 avail 永远够用，
+        // 长歌词的横向滚动会彻底失效。必须撑满整列。
         var lyWrap = new Grid
         {
-            // 歌词列往右让出更多空间给标题列（长标题可完整显示）；
-            // 歌词自身宽度不足时由 RefreshCardLyric 自动滚动，不换行、不增高。
-            Margin = new Thickness(20, 0, 0, 0),
+            Margin = new Thickness(0, 4, 0, 0),
+            HorizontalAlignment = HorizontalAlignment.Stretch,   // 同上：裁剪宽度 = 可用宽
             VerticalAlignment = VerticalAlignment.Center
         };
         lyWrap.ClipToBounds = true;
         var lyStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
-        // 当前行（高亮）
+
+        // 【三行歌词都不设 TextTrimming】
+        // 以前用 CharacterEllipsis：超宽会先在末尾打 "…"，可 Rolling 又要把
+        // 超出部分滚出来 —— 两者互相矛盾。实测看到的是
+        //   "n you didn't love that girl…"：既被滚掉开头、又被省略号砍掉结尾，
+        // 完整歌词永远看不全，滚动等于白做。
+        // 现在改成 None（不裁字），溢出部分由外层 lyWrap.ClipToBounds 裁掉，
+        // 再靠 ApplyLyric 的横向滚动把剩余内容送进来 —— 职责清晰：
+        //   裁剪 = 谁超出容器；滚动 = 如何看到剩下的。
         var lyCur = new TextBlock
         {
             FontSize = 13.5, FontWeight = FontWeights.SemiBold, Foreground = t.TextPrimary,
-            TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.CharacterEllipsis,
+            TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.None,
             HorizontalAlignment = HorizontalAlignment.Left
         };
         // 上下文行（淡化）
         var lyNext = new TextBlock
         {
             FontSize = 11.5, Foreground = t.TextTertiary, Margin = new Thickness(0, 2, 0, 0),
-            TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.CharacterEllipsis,
+            TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.None,
             HorizontalAlignment = HorizontalAlignment.Left
         };
         var lyPrev = new TextBlock
         {
             FontSize = 11.5, Foreground = t.TextTertiary, Margin = new Thickness(0, 0, 0, 2),
-            TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.CharacterEllipsis,
+            TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.None,
             HorizontalAlignment = HorizontalAlignment.Left
         };
         lyStack.Children.Add(lyPrev);
@@ -1373,8 +1732,11 @@ public partial class IslandWindow : Window
         _cardLyricNext = lyNext;
         _cardLyricPanel = lyStack;
         _cardLyricClip = lyWrap;
-        Grid.SetColumn(lyWrap, 2);
-        top.Children.Add(lyWrap);
+        textArea.Children.Add(lyWrap);
+
+        // 右侧内容整体放进第 1 列（第 0 列是封面）
+        Grid.SetColumn(textArea, 1);
+        top.Children.Add(textArea);
 
         root.Children.Add(top);
 
@@ -1382,7 +1744,7 @@ public partial class IslandWindow : Window
         // 命中区比视觉高度高（12px），符合"细进度条也要好点"的手感；
         // 不支持 seek 的会话（直播 / 电台 / 部分播放器）直接禁用，视觉上变灰且光标不变手型。
         bool canSeek = _media?.CanSeek(snap.SourceId) ?? false;
-        double trackW = s_progressTrackWidth;
+        double trackW = ProgressTrackWidth;
         var track = new Border
         {
             Height = 12, Background = Brushes.Transparent, Cursor =
@@ -1659,6 +2021,13 @@ public partial class IslandWindow : Window
 
         if (ev.Kind == "unlock")
             return Native.SvgIcons.CreateSphere("unlock", 19, AppTheme.Current.Success);
+
+        // DSH 工作状态：球体内用 sparkles / check，不依赖应用图标
+        if (ev.Kind == "dsh" && ev.Payload is Sources.DshSnapshot ds)
+            return Native.SvgIcons.CreateSphere(ds.Working ? "sparkles" : "check", 19,
+                ds.Working ? AppTheme.Current.Accent : AppTheme.Current.Success);
+        if (ev.Kind == "dsh-retract")
+            return Native.SvgIcons.CreateSphere("sparkles", 19, AppTheme.Current.TextSecondary);
 
         var icon = Native.AppIconExtractor.GetIcon(ev.AppKey ?? ev.SourceKey);
         if (icon != null)
@@ -1988,6 +2357,62 @@ public partial class IslandWindow : Window
         if (a != null && !a.IsDying) Dismiss(a);
     }
 
+    /// <summary>
+    /// 该 item 此刻应该装的形态（判定口径必须与 Render 里完全一致）。
+    /// 【为什么需要它】<see cref="ApplyVisualTheme"/> 与 <see cref="UpdateItem"/> 原先一律
+    /// 直接调用 BuildContent —— 它对任何 event 都只返回「胶囊」。侧列球体的 item 因此被灌进
+    /// 胶囊内容，而 ContentKey 仍是 "sphere"，Render 的换装守卫（ContentKey != wantedKey）
+    /// 会认为"已经是对的"而永不修复 → 球体里长期装着一个 230px 宽的胶囊：
+    /// 封面按 margin(12,0,8,0) 定位，在 36px 圆里偏右 6px，文字/波形整片溢出球外。
+    /// </summary>
+    private string WantedContentKey(IslandItem item)
+    {
+        if (_stack.IsExpanded && item.Event.Id == _stack.Active?.Event.Id) return "card";
+        return item.Role == IslandRole.Sphere ? "sphere" : "pill";
+    }
+
+    /// <summary>
+    /// 按 item 当前应有的形态重建内容，并把 <see cref="IslandItem.ContentKey"/> 同步为
+    /// 实际装进去的形态。所有「就地重建内容」的地方都必须走它，禁止直接调 BuildContent，
+    /// 否则内容形态与 ContentKey 会脱节，且 Render 再也修不回来。
+    /// </summary>
+    private FrameworkElement? BuildContentFor(IslandItem item)
+    {
+        var key = WantedContentKey(item);
+        var el = key switch
+        {
+            "card" => BuildCard(item.Event),
+            "sphere" => BuildSphere(item.Event),
+            _ => BuildContent(item.Event)
+        };
+        if (el != null) item.ContentKey = key;
+        return el;
+    }
+
+    /// <summary>仅供 DshRenderDiag 渲染自检使用（不参与运行时逻辑）</summary>
+    internal static FrameworkElement BuildDshPillPublic(Sources.DshSnapshot? s) => BuildDshPill(s);
+
+    /// <summary>仅供 DshRenderDiag 渲染自检使用（不参与运行时逻辑）</summary>
+    internal static FrameworkElement BuildSpherePublic(IslandEvent ev) => BuildSphere(ev);
+
+    /// <summary>
+    /// 胶囊宽度公式（<see cref="MeasurePillWidth"/>）——仅供 PillWidthDiag 自检使用。
+    ///
+    /// 自检要用它来当"胶囊应该有多宽"的基准：把真实内容挂进同宽容器里量需求，
+    /// 需求 &gt; 公式即溢出被裁，需求 &lt; 公式即右侧多出空白。
+    /// </summary>
+    internal double MeasurePillWidthPublic(IslandEvent ev) => MeasurePillWidth(ev);
+
+    /// <summary>胶囊内容（<see cref="BuildContent"/>）——仅供 PillWidthDiag 自检使用</summary>
+    internal FrameworkElement? BuildContentPublic(IslandEvent ev) => BuildContent(ev);
+
+    /// <summary>文本实测宽（<see cref="MeasureText"/>）——仅供 PillWidthDiag 自检使用</summary>
+    internal static double MeasureTextPublic(string text, double size, bool bold)
+        => MeasureText(text, size, bold);
+
+    /// <summary>仅供 DshRenderDiag 渲染自检使用（不参与运行时逻辑）</summary>
+    internal FrameworkElement BuildDshCardPublic(Sources.DshSnapshot s) => BuildDshCard(s);
+
     /// <summary>按事件类型构建胶囊内容</summary>
     private FrameworkElement? BuildContent(IslandEvent ev) => ev.Kind switch
     {
@@ -1997,8 +2422,134 @@ public partial class IslandWindow : Window
         "sys" when ev.Payload is Sources.SysSnapshot snap => BuildSysPill(snap, ev),
         "camera" when ev.Payload is Sources.CameraSnapshot cam => BuildCameraPill(cam),
         "unlock" => BuildUnlockPill(ev),
+        "dsh" when ev.Payload is Sources.DshSnapshot ds => BuildDshPill(ds),
+        "dsh-retract" => BuildDshPill(null),
         _ => BuildNotificationPill(ev)
     };
+
+    /// <summary>
+    /// DSH 工作状态胶囊：状态图标 + 会话标题 + 轮/步 + 上下文占用。
+    /// <paramref name="snap"/> 为 null 时表示"收起"（源判定空闲），返回空占位。
+    /// </summary>
+    private static FrameworkElement BuildDshPill(Sources.DshSnapshot? snap)
+    {
+        var t = AppTheme.Current;
+        if (snap == null)
+            return new Grid { Width = 1, Height = 1 };
+
+        bool working = snap.Working;
+        var accent = working ? t.Accent : t.Success;
+
+        var row = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+
+        // 状态图标：工作中 = sparkles（强调色）；已完成 = check（成功色）
+        // 【左内边距 12】此前图标直抵胶囊左边缘，而 MeasurePillWidth 的 "dsh" 分支
+        // 一直按 PaddingX*2 计左右内边距 —— 公式给宽了 24、排版却没占位，
+        // 于是胶囊右侧凭空多出 24px 空白。两边必须一致，这里补上左内边距。
+        row.Children.Add(new Border
+        {
+            Margin = new Thickness(IslandMetrics.PaddingX, 0, 0, 0),
+            Child = Native.SvgIcons.CreateCentered(
+                working ? "sparkles" : "check", 18, accent, 1.2)
+        });
+
+        // 【子代理徽标】DSH 把每个子代理建成独立 session，所以子代理干活时本身
+        // 就是一条 Working 会话、天然出独立岛；但它的 title 多半继承自父会话，
+        // 看起来像「主会话卡住了」。加徽标让用户一眼看出是子代理在干活。
+        if (snap.IsSubagent)
+            row.Children.Add(BuildSubagentTag(t, snap.SubagentMode));
+
+
+        var text = new StackPanel
+        {
+            // 左间距 8（与公式的 "+ 8" 对应）+ 右内边距 12（与公式的 PaddingX 对应）
+            Margin = new Thickness(8, 0, IslandMetrics.PaddingX, 0),
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        // 【文字列定宽，而不是各自设 MaxWidth】
+        // 此前两行各自 MaxWidth = MaxWidth - 120：胶囊被 MaxWidth 截断时，
+        // 两行都按"刚好等于上限"排版 → 又落入"内容宽 == 可用宽"必然出省略号的坑，
+        // 且两行右端不齐。改为共用一个"文本列宽 = 胶囊上限 - 图标 - 间距 - 左右内边距"，
+        // 由 MeasurePillWidth 的同名公式决定，两边永远一致。
+        double textColW = DshPillTextColWidth();
+        text.Children.Add(new TextBlock
+        {
+            Text = string.IsNullOrWhiteSpace(snap.Title) ? "DSH 工作中" : snap.Title,
+            FontSize = 12.5,
+            FontWeight = FontWeights.SemiBold,
+            Foreground = t.TextPrimary,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            MaxWidth = textColW
+        });
+        text.Children.Add(new TextBlock
+        {
+            Text = DescribeDsh(snap),
+            FontSize = 11,
+            Foreground = t.TextSecondary,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            MaxWidth = textColW
+        });
+        row.Children.Add(text);
+
+        return row;
+    }
+
+    /// <summary>子代理徽标（"子代理" + 模式简写），仅子代理会话显示</summary>
+    /// <summary>子代理徽标宽度（与 BuildSubagentTag 的排版保持一致）</summary>
+    private static double SubagentTagWidth(string mode)
+    {
+        var txt = string.IsNullOrWhiteSpace(mode) ? "子代理" : "子代理·" + mode;
+        // 左间距 8 + 左右内边距 6+6
+        return 8 + 12 + MeasureText(txt, 9.5, true);
+    }
+
+    private static FrameworkElement BuildSubagentTag(ThemeTokens t, string mode)
+    {
+        var txt = string.IsNullOrWhiteSpace(mode) ? "子代理" : "子代理·" + mode;
+        var bd = new Border
+        {
+            CornerRadius = new CornerRadius(5),
+            Padding = new Thickness(6, 1, 6, 1),
+            Margin = new Thickness(8, 0, 0, 0),
+            Background = t.Accent,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        bd.Child = new TextBlock
+        {
+            Text = txt,
+            FontSize = 9.5,
+            FontWeight = FontWeights.SemiBold,
+            Foreground = Brushes.White
+        };
+        return bd;
+    }
+
+    /// <summary>DSH 副标题：轮/步 · 上下文 % · 模型</summary>
+    private static string DescribeDsh(Sources.DshSnapshot snap)
+    {
+        var parts = new System.Collections.Generic.List<string>();
+        if (snap.Working)
+            // Stepping=false 且 Working=true = 正在跑工具（openStep 已清空但 turn 未结束）
+            parts.Add(snap.Stepping
+                ? $"第 {Math.Max(snap.Turn, 1)} 轮 · 步 {snap.Step}"
+                : $"第 {Math.Max(snap.Turn, 1)} 轮 · 执行中");
+        else
+            parts.Add($"第 {Math.Max(snap.Turn, 1)} 轮 · 共 {snap.Steps} 步");
+
+        if (snap.ContextWindow > 0) parts.Add($"上下文 {snap.ContextPercent}%");
+        if (!string.IsNullOrWhiteSpace(snap.Model))
+        {
+            var m = snap.Model;
+            var i = m.LastIndexOf('/');
+            if (i >= 0 && i < m.Length - 1) m = m[(i + 1)..];
+            parts.Add(m);
+        }
+        return string.Join(" · ", parts);
+    }
 
     /// <summary>键位 / 摄像头胶囊（docs §5.5）：Lucide 键帽图标 + 名称 + 开/关</summary>
     private static FrameworkElement BuildSysPill(Sources.SysSnapshot snap, IslandEvent ev)
@@ -2055,11 +2606,16 @@ public partial class IslandWindow : Window
             VerticalAlignment = VerticalAlignment.Center
         });
 
+        // 【右内边距 12】此前"开/关"之后没有任何右留白，内容直抵胶囊圆角边缘。
+        // 宽度公式（TogglePillWidth）已把这 12 计入，这里补上，两边必须一致。
+        //
+        // 【有 tail 时右内边距交给 tail 承担】否则会出现 12 + 7 = 19 的间距，
+        // 与宽度公式算的 7 对不上（公式与排版脱节 → 尾部凭空少一截）。
         panel.Children.Add(new TextBlock
         {
             Text = on ? "开" : "关",
             FontSize = 11.5,
-            Margin = new Thickness(7, 0, 0, 0),
+            Margin = new Thickness(7, 0, string.IsNullOrWhiteSpace(tail) ? 12 : 0, 0),
             Foreground = stateColor ?? (on ? t.Accent : t.TextTertiary),
             VerticalAlignment = VerticalAlignment.Center
         });
@@ -2135,6 +2691,10 @@ public partial class IslandWindow : Window
         var panel = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
         panel.Children.Add(new Border { Child = BuildAppIcon(ev.AppKey ?? ev.SourceKey), Margin = new Thickness(12, 0, 8, 0) });
 
+        // 【标题与正文都设了 TextTrimming】
+        // 因此宽度公式（MeasurePillWidth 的默认分支）为它们各留了 EllipsisSlack。
+        // 但正文右边的 8 是"与标题的间距"，省略号必须出现在它**之外**，
+        // 所以正文自己的右内边距与标题一致（都是 12），保持右边线对齐。
         var title = new TextBlock
         {
             Text = ev.Title, FontSize = 13, FontWeight = FontWeights.SemiBold,
@@ -2148,11 +2708,16 @@ public partial class IslandWindow : Window
         {
             panel.Children.Add(new TextBlock
             {
-                Text = ev.Subtitle, FontSize = 11.5, Margin = new Thickness(8, 0, 0, 0),
+                Text = ev.Subtitle, FontSize = 11.5, Margin = new Thickness(8, 0, 12, 0),
                 Foreground = AppTheme.Current.TextSecondary,
                 VerticalAlignment = VerticalAlignment.Center,
                 TextTrimming = TextTrimming.CharacterEllipsis
             });
+        }
+        else
+        {
+            // 无正文时右内边距由标题承担
+            title.Margin = new Thickness(0, 0, 12, 0);
         }
         return panel;
     }
@@ -2166,11 +2731,15 @@ public partial class IslandWindow : Window
             Width = 16, Height = 16, Margin = new Thickness(12, 0, 9, 0),
             Child = Native.SvgIcons.CreateCentered("clock", 16, AppTheme.Current.TextPrimary, 1.1)
         });
+        // 【右内边距 12】此前时间后面没有任何右留白，内容直抵胶囊圆角边缘。
+        // MeasurePillWidth 的 "clock" 分支已把这 12 计入宽度，两边必须一致，
+        // 否则胶囊右侧会凭空多出一块空白。
         panel.Children.Add(new TextBlock
         {
             Text = ev.Title, FontSize = 13, FontWeight = FontWeights.SemiBold,
             Foreground = AppTheme.Current.TextPrimary,
-            VerticalAlignment = VerticalAlignment.Center
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 12, 0)
         });
         if (!string.IsNullOrWhiteSpace(ev.Subtitle))
             panel.Children.Add(new TextBlock
@@ -2191,22 +2760,241 @@ public partial class IslandWindow : Window
             Width = 16, Height = 16, Margin = new Thickness(12, 0, 9, 0),
             Child = Native.SvgIcons.CreateCentered("timer", 16, AppTheme.Current.Success, 1.1)
         });
+        // 【右内边距 12】与 MeasurePillWidth 的 "usage" 分支保持一致
         panel.Children.Add(new TextBlock
         {
             Text = ev.Title, FontSize = 13, FontWeight = FontWeights.SemiBold,
             Foreground = AppTheme.Current.TextPrimary,
-            VerticalAlignment = VerticalAlignment.Center
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 12, 0)
         });
         return panel;
+    }
+
+    /// <summary>
+    /// 使用时长详情卡（展开态）：本周使用时长树状图。
+    /// 结构：
+    ///   ① 顶部一行汇总（本周合计 + 日均）
+    ///   ② 每天一个节点：日期 + 柱状条 + 当天合计
+    ///      柱内再按应用拆分（树状图的第二层），条宽按占比，
+    ///      只显示当天用得最多的前 3 个应用，其余归入"其他"。
+    /// </summary>
+    private FrameworkElement BuildUsageCard(IslandEvent ev)
+    {
+        var t = AppTheme.Current;
+        var root = new StackPanel { Margin = new Thickness(16, 14, 16, 14) };
+
+        var week = Sources.UsageTracker.LoadWeek(DateTime.Today);
+        var total = week.Where(d => d.HasStarted).Aggregate(TimeSpan.Zero, (a, d) => a + d.Total);
+        var elapsedDays = week.Count(d => d.HasStarted);
+        var avg = elapsedDays > 0 ? total / elapsedDays : TimeSpan.Zero;
+
+        // ---- 顶部汇总 ----
+        var head = new Grid();
+        head.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        head.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        head.Children.Add(new Border
+        {
+            Width = 26, Height = 26, CornerRadius = new CornerRadius(13),
+            Background = t.AccentGradient, Margin = new Thickness(0, 0, 10, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+            Child = Native.SvgIcons.CreateCentered("timer", 14, Brushes.White, 1.3)
+        });
+        var headTxt = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+        headTxt.Children.Add(new TextBlock
+        {
+            Text = $"本周已用 {FmtH(total)}", FontSize = 15, FontWeight = FontWeights.SemiBold,
+            Foreground = t.TextPrimary
+        });
+        headTxt.Children.Add(new TextBlock
+        {
+            Text = $"{week[0].Date:MM/dd} – {week[6].Date:MM/dd} · 已过 {elapsedDays} 天 · 日均 {FmtH(avg)}",
+            FontSize = 11, Margin = new Thickness(0, 3, 0, 0),
+            Foreground = t.TextSecondary
+        });
+        Grid.SetColumn(headTxt, 1);
+        head.Children.Add(headTxt);
+        root.Children.Add(head);
+
+        // ---- 每天一行：周一 → 周日 固定 7 行，没有数据的日子照样占位 ----
+        // 条宽以"本周最长的一天"为基准（而不是全周平均或固定值），
+        // 因此周初几天没数据也不会压缩后面的条形，分析不受影响。
+        double maxTotal = week.Count > 0 ? week.Max(d => d.Total.TotalMinutes) : 0;
+        if (maxTotal <= 0) maxTotal = 1;   // 避免除零
+
+        // 【必须显式建 7 个 RowDefinition】Grid 不定义行时所有子元素都叠在第 0 行，
+        // 表现为"7 天的条全部重叠在顶部"（曾只看到一根条 + 一天的字）。
+        var weekGrid = new Grid();
+        for (int i = 0; i < week.Count; i++) weekGrid.RowDefinitions.Add(new RowDefinition());
+        double scaleS = IslandMetrics.Scale <= 0 ? 1.0 : IslandMetrics.Scale;
+        double cardBarMax = Math.Max(60, IslandMetrics.CardWidth * scaleS - 32 - 30 - 62 - 6);
+        for (int i = 0; i < week.Count; i++)
+        {
+            var row = BuildWeekRow(week[i], maxTotal, t, cardBarMax);
+            Grid.SetRow(row, i);
+            weekGrid.Children.Add(row);
+        }
+        root.Children.Add(weekGrid);
+
+        // 【忽略按钮】使用时长岛 Ttl=null 是常驻的（改TTL 会导致"还没悬停就消失"），
+        // 但常驻岛必须有手动关闭入口，否则用户无法让它离开屏幕 ——
+        // 表现为"没有忽略按钮，导致使用时长岛常驻"。
+        var acts = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Margin = new Thickness(0, 12, 0, 0)
+        };
+        acts.Children.Add(MakeTextButton("忽略", t, true, () =>
+        {
+            DismissActive();
+            return Task.CompletedTask;
+        }));
+        acts.Children.Add(MakeTextButton("数据目录", t, false, () =>
+        {
+            try
+            {
+                var dir = System.IO.Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "ChronoIsland");
+                System.IO.Directory.CreateDirectory(dir);
+                System.Diagnostics.Process.Start("explorer.exe", dir);
+            }
+            catch (Exception ex) { App.Log("Usage", ex); }
+            return Task.CompletedTask;
+        }));
+        root.Children.Add(acts);
+
+        return root;
+    }
+
+    /// <summary>
+    /// 周视图中的一天：周几 + 堆叠条（按应用） + 合计时长。
+    /// barMax 传入该容器的条形可用宽度：灵动岛卡传 CardWidth 口径，
+    /// 设置页传更宽的值 —— 否则设置页里条形会短得看不出比例。
+    /// </summary>
+    public static FrameworkElement BuildWeekRow(Sources.UsageDay d, double maxTotal, ThemeTokens t,
+        double barMax)
+    {
+        var row = new Grid { Height = 22, Margin = new Thickness(0, 1.5, 0, 1.5) };
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(30) });   // 周几
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) }); // 条
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(62) });  // 合计
+
+        bool future = d.IsFuture;
+        bool today = d.Date == DateTime.Today;
+        string[] wd = { "一", "二", "三", "四", "五", "六", "日" };
+        row.Children.Add(new TextBlock
+        {
+            Text = wd[((int)d.Date.DayOfWeek + 6) % 7],   // 周一=0 … 周日=6
+            FontSize = 11,
+            FontWeight = today ? FontWeights.SemiBold : FontWeights.Normal,
+            Foreground = future ? t.TextTertiary : (today ? t.Accent : t.TextSecondary),
+            VerticalAlignment = VerticalAlignment.Center
+        });
+
+        // 条形容器：固定行高 + ClipToBounds ——
+        // 即使某天数据异常导致色块算得过宽，也只会裁在本列内，
+        // 绝不溢出压到右侧「合计」或左侧「周次」。
+        var barHost = new Grid { Height = 18, VerticalAlignment = VerticalAlignment.Center };
+        barHost.ClipToBounds = true;
+        if (d.Total > TimeSpan.Zero)
+        {
+            double scale = d.Total.TotalMinutes / maxTotal;   // 当天条宽占比
+            var top = d.Apps.OrderByDescending(kv => kv.Value).Take(3).ToList();
+            TimeSpan restTotal = d.Total - top.Aggregate(TimeSpan.Zero, (a, kv) => a + kv.Value);
+            var brushes = new Brush[] { t.Accent, t.Success, t.Warning,
+                                       new SolidColorBrush(Color.FromArgb(120, 140, 140, 152)) };
+            // 【条形最大宽度由调用方传入】之前写死 300，但 Star 列实际窄得多，
+            // 超出部分不会裁掉，而是把右侧「合计」压到周次上（糊成一团）。
+            double totalW = Math.Max(60, barMax) * scale;
+            // 横向 StackPanel：各应用色块首尾相接，拼成一根按应用分段的条
+            var stack = new StackPanel { Orientation = Orientation.Horizontal, Height = 18 };
+            int i = 0;
+            foreach (var kv in top)
+            {
+                double w = totalW * (kv.Value.TotalMinutes / Math.Max(0.001, d.Total.TotalMinutes));
+                var seg = new Border
+                {
+                    Width = Math.Max(2, w), Height = 18, Background = brushes[i % brushes.Length],
+                    CornerRadius = i == 0 ? new CornerRadius(3) : new CornerRadius(0)
+                };
+                seg.ToolTip = $"{kv.Key} · {FmtH(kv.Value)}";
+                stack.Children.Add(seg);
+                i++;
+            }
+            if (restTotal > TimeSpan.Zero)
+            {
+                double w = totalW * (restTotal.TotalMinutes / Math.Max(0.001, d.Total.TotalMinutes));
+                var seg = new Border
+                {
+                    Width = Math.Max(2, w), Height = 18, Background = brushes[3],
+                    CornerRadius = new CornerRadius(0, 3, 3, 0), ToolTip = $"其他 {top.Count} 个应用 · {FmtH(restTotal)}"
+                };
+                stack.Children.Add(seg);
+            }
+            barHost.Children.Add(stack);
+        }
+        else
+        {
+            barHost.Children.Add(new Border
+            {
+                Width = d.HasStarted ? 3 : 0, Height = 3,
+                Background = t.RowSurface, CornerRadius = new CornerRadius(1.5),
+                HorizontalAlignment = HorizontalAlignment.Left
+            });
+        }
+        Grid.SetColumn(barHost, 1);
+        row.Children.Add(barHost);
+
+        // 【必须显式指定第 2 列】不写 Grid.SetColumn 会默认落在第 0 列，
+        // 于是「合计」压在「周次」底下（同一列叠在一起），
+        // 右侧列宽再大也永远是空白 —— 表现为时长根本没显示。
+        var durText = new TextBlock
+        {
+            Text = future || !d.HasStarted ? "—" : FmtH(d.Total),
+            FontSize = 10.5,
+            // 定宽不换行：宁可省略也不撑破列宽压到左侧「周次」上
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            TextWrapping = TextWrapping.NoWrap,
+            Foreground = future || !d.HasStarted ? t.TextTertiary : (today ? t.Accent : t.TextSecondary),
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        Grid.SetColumn(durText, 2);
+        row.Children.Add(durText);
+        return row;
+    }
+
+    /// <summary>时长格式化：不足 1 小时用「Xm」，否则「Xh Ym」</summary>
+    private static string FmtH(TimeSpan ts)
+    {
+        if (ts <= TimeSpan.Zero) return "0m";
+        int h = (int)ts.TotalHours;
+        int m = ts.Minutes;
+        return h > 0 ? $"{h}h {m:00}m" : $"{m}m";
     }
 
     /// <summary>媒体胶囊：封面 + 歌名 + 艺术家 + 波形</summary>
     private FrameworkElement BuildMediaPill(Sources.MediaSnapshot snap)
     {
         var grid = new Grid();
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        // 【三列宽度全部显式给定，不用 Auto / Star】
+        // Grid 的 Auto 列永远不会缩小：标题一长就把 Star 列挤成 0，
+        // TextTrimming 因此永远不触发（文本被硬裁，而不是省略号），
+        // 内容还会直接溢出胶囊右边界。
+        // 这里把各列宽度算成固定像素值，文字列因此有确定的可用宽度，
+        // 超长标题会正确省略、超宽歌词会正确触发滚动。
+        // 歌词宽度取「全曲代表性宽度」而非"当前这句"，保证容器与列宽始终一致（见 TrackLyricWidth）
+        // 【列宽必须与容器宽同源】
+        // 先按 MediaPillWidth 算出"最终生效的容器宽"，再由它反推文字列宽。
+        // 以前这里独立调用 MediaPillTextWidth，和 MediaPillWidth 各算一遍；
+        // 而歌词宽度依赖当前播放位置，两次调用可能落在不同歌词行，
+        // 于是 columns[1] 与容器宽失配 → 文字列溢出到波形列上。
+        double totalW = MediaPillWidth(snap, TrackLyricWidth(snap));   // 内部已同步列宽
+        double textW = Math.Max(60, totalW - PillCoverColW - PillWaveColW - PillTailPad);
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(PillCoverColW) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(textW) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(PillWaveColW + PillTailPad) });
 
         // 封面：优先来源应用图标（Chrome / Spotify …），取不到再用渐变块
         var coverHost = new Grid { Width = 24, Height = 24, Margin = new Thickness(12, 0, 8, 0) };
@@ -2232,19 +3020,48 @@ public partial class IslandWindow : Window
         Grid.SetColumn(coverHost, 0);
         grid.Children.Add(coverHost);
 
-        // ---------- 右侧文字列：上行（标题+作者+波形） / 下行（歌词）----------
-        // 布局：图标左固定不动，歌词与歌名作者统一排在图标右侧
+        // ---------- 右侧文字列：上行（标题+作者） / 下行（歌词）----------
+        // 布局：图标左固定不动，歌词与歌名作者统一排在图标右侧。
+        // 【宽度必须受控】文字列是定宽列：外层 Grid 已按 textW 给了确定宽度，
+        // 这里再钉一个 MaxWidth 兜底，绝不让内容顶出胶囊右边界。
         var textCol = new StackPanel
         {
             Orientation = Orientation.Vertical,
             VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(0, 0, 0, 0)
+            Margin = new Thickness(0, 0, 0, 0),
+            HorizontalAlignment = HorizontalAlignment.Left
         };
+        textCol.Width = textW;
+        textCol.ClipToBounds = true;
 
-        // 上行：标题 + 作者（横向）+ 波形推到最右
-        var metaRow = new Grid();
-        metaRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        metaRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        // 上行：标题 + 作者（横向）。
+        // 【标题列必须能被压缩】用 Star 而不是 Auto：Auto 列不会收缩，
+        // 标题过长时会挤掉作者并溢出容器（此时 TextTrimming 根本不触发）。
+        // Star 列会被压缩到可用宽度，省略号才能正常出现。
+        //
+        // 【但整行宽度必须夹到"元信息自身所需"】否则 Star 列会把 textW 里所有余量
+        // 全部吞掉并推给最右端：作者是 Auto 列 → 被顶到 textCol 右缘，
+        // 标题字形左对齐 → 中间就空出一大片。而 textW = Max(metaW, lyricW) + 18，
+        // 余量随歌词长度变化，所以"标题↔作者间距"会随当时那句歌词忽大忽小；
+        // 长歌词时作者还会紧贴波形（列宽 22+6+8 零余量），看起来就是"挤了波形"。
+        //
+        // 夹到 metaW 后：Star 列宽 == 标题自身宽，作者紧跟标题（间距恒为 margin 的 7px），
+        // 余量全部留在本行右端（作者与波形之间）—— 既恒定又给波形留出呼吸空间。
+        // 夹到 textW 后：标题超长时照常省略，作者仍紧跟其后，不会溢出。
+        double titleW = MeasureText(snap.Title, 12.5, true);
+        double artistW = string.IsNullOrWhiteSpace(snap.Artist) ? 0 : MeasureText(snap.Artist!, 11) + 7;
+        double metaW = titleW + artistW;
+
+        // 【本行宽 = 元信息 + EllipsisSlack，而不是恰好等于 metaW】
+        // WPF 判断"要不要加省略号"时，会把末尾 "…" 字形的宽度也一起算进可用宽度里。
+        // 因此内容宽度与可用宽度**恰好相等**时它仍会截断 —— 表现为
+        // 「量得下却显示成 Leehom W…」。余量必须留出至少一个省略号字宽。
+        //
+        // 余量放在【作者与波形之间】，而不是作者与标题之间：
+        // 作者仍是 Auto 列紧跟标题（间距恒为 Margin 的 7），
+        // 多出来的宽度全部堆在本行右端，不改变既有排版观感。
+        double metaRowW = Math.Min(textW, metaW + EllipsisSlack);
+        var metaRow = new Grid { Width = metaRowW, HorizontalAlignment = HorizontalAlignment.Left };
         metaRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         metaRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
@@ -2265,12 +3082,19 @@ public partial class IslandWindow : Window
                 Text = snap.Artist, FontSize = 11, Margin = new Thickness(7, 0, 0, 0),
                 Foreground = AppTheme.Current.TextSecondary,
                 TextTrimming = TextTrimming.CharacterEllipsis,
-                VerticalAlignment = VerticalAlignment.Center
+                VerticalAlignment = VerticalAlignment.Center,
+                // 作者宽度上限 = 整行实际可用 - 标题所需宽 - 7 间距。
+                // 标题优先占满，作者按剩余空间收缩（省略号随之出现）。
+                // 【下限不能给 44】metaRow 现已夹到 metaW + EllipsisSlack，若标题很长、
+                // 真实剩余不足 44，44 的下限会让 Auto 列抢走超过可用的宽度，把标题额外压扁；
+                // 这里只用一个小下限防止完全塌成 0。
+                // 【与 metaRowW 同一口径】两处必须一致，否则作者列可用宽度会
+                // 超过本行实际宽度 → 作者被挤出胶囊右边界。
+                MaxWidth = Math.Max(16, metaRowW - titleW - 7)
             };
             Grid.SetColumn(artist, 1);
             metaRow.Children.Add(artist);
         }
-        // 波形：放在 metaRow 第 3 列（右端），由 BuildMediaPill 尾部统一添加
         textCol.Children.Add(metaRow);
 
         // 下行：歌词（有歌词时才显示；宽度自适应 / 超宽滚动在 ApplyLyric 中处理）
@@ -2294,6 +3118,10 @@ public partial class IslandWindow : Window
 
         Grid.SetColumn(textCol, 1);
         grid.Children.Add(textCol);
+        _pillGrid = grid;
+        _pillTextCol = textCol;
+        // 引用就位后按同一公式再同步一次（构建早期 _pillGrid 还是旧的/空的）
+        ApplyMediaPillColumns(Math.Max(60, totalW - PillCoverColW - PillWaveColW - PillTailPad));
 
         // 波形：Playing 时动画，Paused 时静止
         // 波形：明确固定宽度，右 Margin 与岛内边距(12)对齐，
@@ -2301,7 +3129,9 @@ public partial class IslandWindow : Window
         var wave = new StackPanel
         {
             Orientation = Orientation.Horizontal,
-            Margin = new Thickness(6, 0, 0, 0),
+            // 右 Margin 必须等于 PillTailPad：胶囊宽度里已按它预留了留白，
+            // 波形本身放在第 2 列（宽 PillWaveColW = 22 + 6）刚好填满。
+            Margin = new Thickness(6, 0, PillTailPad, 0),
             Width = 22,                                  // 4×2.5 + 3×2(间距) ≈ 16，留余量
             HorizontalAlignment = HorizontalAlignment.Right,
             VerticalAlignment = VerticalAlignment.Center,
@@ -2337,57 +3167,194 @@ public partial class IslandWindow : Window
     }
 
     /// <summary>
-    /// 用 FormattedText 精确测量文本宽度（歌词需要真实宽度做三段式自适应，
-    /// 字数估算会导致歌词被裁或留白不准）。
+    /// 测量一段文本排版后的自然宽度 —— **与 TextBlock 的实际排版同源**。
+    ///
+    /// 【为什么不用 FormattedText】这是本项目踩过最深的一个坑，分两层：
+    ///
+    /// ① <see cref="FormattedText"/> 不做字体回退。胶囊里的 TextBlock 没显式设
+    ///    FontFamily，走的是 SystemFonts.MessageFontFamily（Segoe UI），
+    ///    Segoe UI **不含任何中文字形**，渲染时 WPF 会自动回退到雅黑把中文画出来；
+    ///    而 FormattedText 只按给定的 Typeface 量、不回退，中文被按缺字宽度量出来。
+    ///    实测歌名「心跳」12.5px：只给 Segoe UI → 13.8 DIP（实际应约 25），
+    ///    少了近一半。少量一半意味着所有含中文的胶囊宽度被系统性低估：
+    ///      · 胶囊太窄 → 内容越过右边界被硬裁（图二：时钟的「10月16日 周四」少一截）
+    ///      · 内容列太窄 → 标题/作者被省略号截断（图一：「Leehom W…」）
+    ///
+    /// ② 即使补上字体列表，FormattedText 的字形推进/舍入仍与 TextBlock 的
+    ///    排版引擎有 3–8 DIP 的出入，恰好落在"要不要省略号"的判定边界上。
+    ///    用它算宽就会出现"公式说放得下、实际还是被截"。
+    ///
+    /// 【现在怎么做】直接用 TextBlock 自己 Measure：同一个控件类型、同一套字体回退、
+    /// 同一套排版引擎，量出来的就是它真正会占的宽度，因此公式与排版不可能再脱节。
+    /// 代价是每次测量要建一个临时 TextBlock —— 这些测量只发生在
+    /// 事件到达 / 歌词换行 / 卡片构建时，不是每帧热路径。
+    ///
+    /// 【无约束是关键】宽度给 PositiveInfinity，TextTrimming 才不会触发，
+    /// 量到的正是"内容不被截断所需的宽度"。
     /// </summary>
     private static double MeasureText(string text, double fontSize, bool bold = false)
     {
         if (string.IsNullOrEmpty(text)) return 0;
         try
         {
-            var ft = new FormattedText(
-                text, System.Globalization.CultureInfo.CurrentCulture,
-                System.Windows.FlowDirection.LeftToRight,
-                new Typeface(new FontFamily("Segoe UI"), FontStyles.Normal,
-                             bold ? FontWeights.SemiBold : FontWeights.Normal, FontStretches.Normal),
-                fontSize, Brushes.White, VisualTreeHelper.GetDpi(Application.Current.MainWindow).PixelsPerDip);
-            return ft.Width;
+            var tb = new TextBlock
+            {
+                Text = text,
+                FontSize = fontSize,
+                FontWeight = bold ? FontWeights.SemiBold : FontWeights.Normal,
+                TextWrapping = TextWrapping.NoWrap,
+                TextTrimming = TextTrimming.None,
+                // 与胶囊内的 TextBlock 对齐：同样的默认字体 + 同样的行距行为
+                LineHeight = double.NaN,
+                LineStackingStrategy = LineStackingStrategy.MaxHeight,
+            };
+            tb.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            double w = tb.DesiredSize.Width;
+            return w > 0 && !double.IsInfinity(w) ? w : EstimateWidth(text, fontSize);
         }
-        catch { return text.Length * fontSize * 0.55; }
+        catch
+        {
+            // 兜底：按"拉丁 0.55em / CJK 1em"估算
+            return EstimateWidth(text, fontSize);
+        }
     }
 
+    /// <summary>
+    /// 无字体环境下的粗略估算：CJK 与全角标点按 1.0em，其余按 0.55em。
+    /// 仅在 <see cref="MeasureText"/> 抛异常时兜底，正常路径不会走到。
+    /// </summary>
+    private static double EstimateWidth(string text, double fontSize)
+    {
+        double w = 0;
+        foreach (char c in text)
+            w += IsWideChar(c) ? fontSize : fontSize * 0.55;
+        return w;
+    }
+
+    /// <summary>是否 CJK / 全角字符（全角标点也算，它们同样是 1em 宽）</summary>
+    private static bool IsWideChar(char c)
+        => (c >= '\u1100' && c <= '\u115F')   // 谚文字母
+        || (c >= '\u2E80' && c <= '\uA4CF')   // CJK 部首、假名、汉字
+        || (c >= '\uAC00' && c <= '\uD7A3')   // 谚文音节
+        || (c >= '\uF900' && c <= '\uFAFF')   // CJK 兼容表意
+        || (c >= '\uFE30' && c <= '\uFE6F')   // CJK 兼容形式
+        || (c >= '\uFF00' && c <= '\uFF60')   // 全角 ASCII
+        || (c >= '\uFFE0' && c <= '\uFFE6');  // 全角符号
+
+    /// <summary>
+    /// 胶囊（中央位）的目标宽度 —— **未缩放口径**，渲染时乘 <see cref="IslandMetrics.Scale"/>。
+    ///
+    /// 【铁律】本函数的每一个加项都必须与对应的 <c>Build*Pill()</c> 里的
+    /// 元素排版一一对应（图标尺寸、Margin、字号、TextTrimming）。
+    /// 一旦两边脱节，症状分两种，都会被用户当成"岛的长度不对"：
+    ///   · 算得比排版窄 → 内容越过胶囊右边界被硬裁（图二：时钟「10月16日 周四」少一截）
+    ///   · 算得比排版宽 → 右侧凭空多出一块空白
+    ///
+    /// 【曾经踩过的坑】旧实现用「字数 × 7.2」估算宽度，而排版用 FormattedText 实测：
+    /// 中文与拉丁数字的字宽差异可达 2 倍，于是估算系统性偏窄 → 右侧被裁。
+    /// 现已全部改为 FormattedText 实测。
+    ///
+    /// 【省略号余量】凡该位置设了 TextTrimming，就额外加 <see cref="EllipsisSlack"/>：
+    /// WPF 判断是否加省略号时会把 "…" 字形算进可用宽度，余量为 0 时"量得下也被截"。
+    /// </summary>
     private double MeasurePillWidth(IslandEvent ev)
     {
-        if (ev.Kind is "sys" or "camera")
-            // 键帽(22) + 键名 + 开/关：固定估算，不随 Title 长度变化
-            return Math.Clamp(22 + 20 + ev.Title.Length * 7.2 + 8 + 22 + 24,
-                IslandMetrics.MinWidth, IslandMetrics.MaxWidth);
-        if (ev.Kind == "unlock")
-            return Math.Clamp(22 + 20 + ev.Title.Length * 7.2 + 8 + ev.Subtitle!.Length * 6.0 + 24,
-                IslandMetrics.MinWidth, IslandMetrics.MaxWidth);
-        if (ev.Kind == "media")
+        // 各胶囊的右内边距（与 Build*Pill 中最后一个元素的右 Margin 一致）：
+        //   0 → 内容紧贴右边缘，几乎不留白（历史上的做法，观感尚可但显拥挤）
+        //   1 → 补一个右内边距，让左右对称（内边距不足的胶囊宽度同样要补）
+        double w = ev.Kind switch
         {
-            // 媒体胶囊宽度：精确测量（标题+作者+波形）与（歌词）取较大者，
-            // 实现三段式第②步"歌词放不下时先把岛加宽"
-            var snap = ev.Payload as Sources.MediaSnapshot;
-            string? lyric = null;
-            if (snap != null && _settings.Media.ShowLyrics && Sources.MediaSourcePolicy.IsMusicPlayer(snap.SourceId))
-            {
-                int posMs = (int)CurrentPositionMs(snap);
-                lyric = _lyrics.CurrentText(posMs, _lyricOffsetMs);
-            }
-            if (snap != null) return MediaPillWidth(snap, lyric);
-            return Math.Clamp(56 + ev.Title.Length * 7.2 +
-                (string.IsNullOrEmpty(ev.Subtitle) ? 0 : ev.Subtitle.Length * 6.0 + 8),
-                IslandMetrics.MinWidth, IslandMetrics.MaxWidth);
-        }
+            // ---- 媒体：走三列口径，必须与 BuildMediaPill 完全一致 ----
+            "media" when ev.Payload is Sources.MediaSnapshot ms
+                => MediaPillWidth(ms, TrackLyricWidth(ms)),
 
-        // 0.0.1 用字数估算；后续用 FormattedText 精确测量
-        double w = 24;                     // 图标 + 间距
-        w += ev.Title.Length * 7.2;
-        if (!string.IsNullOrEmpty(ev.Subtitle)) w += ev.Subtitle.Length * 6.0 + 8;
-        w += IslandMetrics.PaddingX * 2;
+            // ---- DSH：图标 18 + 文字左边距 8 + 两行取宽 + 左右内边距 ----
+            // BuildDshPill 的图标是 CreateCentered(18) → 实际占位 18，两行都有
+            // TextTrimming → 取宽者再加 EllipsisSlack。
+            // 子代理徽标也要计入宽度（BuildSubagentTag：字号 9.5 半粗 + 左右各 6 内边距 + 左间距 8）
+            "dsh" when ev.Payload is Sources.DshSnapshot ds
+                => 18 + 8 + (ds.IsSubagent ? SubagentTagWidth(ds.SubagentMode) : 0) + Math.Max(
+                        MeasureText(ds.Title.Length > 0 ? ds.Title : "DSH 工作中", 12.5, true),
+                        MeasureText(DescribeDsh(ds), 11))
+                   + EllipsisSlack + IslandMetrics.PaddingX * 2,
+
+            // dsh-retract：BuildDshPill(null) 返回 1×1 空占位，按正圆收
+            "dsh-retract" => IslandMetrics.MinWidth,
+
+            // ---- 键位 / 摄像头：BuildTogglePill ----
+            // 键帽 22 + 左右 Margin(11+9) + 名称 13 + 间距 7 + 状态"开/关" 11.5 + 右内边距 12
+            "sys" or "camera" => TogglePillWidth(
+                ev.Kind == "camera" ? "摄像头" : SignalNameOf(ev),
+                tail: ev.Kind == "camera" && ev.Payload is Sources.CameraSnapshot cam
+                        && !string.IsNullOrWhiteSpace(cam.DeviceName) ? cam.DeviceName : null),
+
+            // ---- 解锁：BuildUnlockPill ----
+            // 图标 17 + Margin(12+9) + 固定文案 + 间距 8 + 时间 11 + 右内边距 12
+            "unlock" => 12 + 17 + 9
+                        + MeasureText("已解锁 · 进入桌面", 13, true)
+                        + 8 + MeasureText(ev.CreatedAt.ToString("HH:mm"), 11)
+                        + 12,
+
+            // ---- 时钟：BuildClockPill ----
+            // 图标 16 + Margin(12+9) + 时间 13 SemiBold + 间距 8 + 日期 11 + 右内边距 12
+            "clock" => 12 + 16 + 9
+                     + MeasureText(ev.Title, 13, true)
+                     + (string.IsNullOrWhiteSpace(ev.Subtitle) ? 0
+                        : 8 + MeasureText(ev.Subtitle!, 11))
+                     + 12,
+
+            // ---- 使用时长：BuildUsagePill ----
+            // 图标 16 + Margin(12+9) + 标题 13 SemiBold + 右内边距 12
+            "usage" => 12 + 16 + 9 + MeasureText(ev.Title, 13, true) + 12,
+
+            // ---- 通知（默认）：BuildNotificationPill ----
+            // 图标 24 + Margin(12+8) + 标题 13 SemiBold + 间距 8 + 正文 11.5 + 右内边距 12
+            //
+            // 【EllipsisSlack 只加一次，不是每段各加一次】
+            // 标题与正文都设了 TextTrimming，但它们是**同一行上的左右两段**：
+            // 排版时 WPF 对两段各自算可用宽，只要这一行整体还有余量，两段就都不截。
+            // 曾经给标题、正文各加 12 → 公式比排版宽出整整 24 DIP，
+            // 表现为通知胶囊右侧凭空多出一块空白（自检里显示为差 -24）。
+            // 整行只留一份余量即可，两段都安全。
+            _ => 12 + 24 + 8
+               + MeasureText(ev.Title, 13, true)
+               + (string.IsNullOrWhiteSpace(ev.Subtitle) ? 0
+                  : 8 + MeasureText(ev.Subtitle!, 11.5))
+               + EllipsisSlack + 12
+        };
         return Math.Clamp(w, IslandMetrics.MinWidth, IslandMetrics.MaxWidth);
+    }
+
+    /// <summary>
+    /// DSH 胶囊文字列在【胶囊宽度上限】下能分到的宽度。
+    ///
+    /// 与 <see cref="MeasurePillWidth"/> 的 "dsh" 分支同源：
+    /// 上限 = 左内边距 12 + 图标 18 + 间距 8 + 文字列 + 右内边距 12。
+    /// 两行共用它 → 行宽恒定、右端对齐，且不会因"刚好等于上限"而被省略号误伤。
+    /// </summary>
+    private static double DshPillTextColWidth()
+        => Math.Max(40, IslandMetrics.MaxWidth - 12 - 18 - 8 - 12);
+
+    /// <summary>键位事件的信号名（与 BuildSysPill 用的 SignalName 同口径）</summary>
+    private static string SignalNameOf(IslandEvent ev)
+        => SignalName(ev.Payload is Sources.SysSnapshot ss ? ss.Signal : "keyboard");
+
+    /// <summary>
+    /// BuildTogglePill 的宽度，与 <see cref="BuildTogglePill"/> 的排版逐项对应：
+    ///   键帽 22 + 左 11 + 右 9 + 名称 13 SemiBold + 间距 7 + 状态 11.5
+    ///   + 尾巴：无 tail 则 12 右内边距；有 tail 则 间距 7 + tail(≤130) + 右内边距 12
+    /// tail 设了 MaxWidth=130，因此它超长时会省略号 → 按 130 封顶计入。
+    /// </summary>
+    private double TogglePillWidth(string name, string? tail)
+    {
+        double w = 11 + 22 + 9                       // 键帽 + 左右 Margin
+                 + MeasureText(name, 13, true)       // 名称
+                 + 7 + MeasureText("开", 11.5);      // 间距 + 状态（开/关同宽，中文一字）
+        if (!string.IsNullOrWhiteSpace(tail))
+            w += 7 + Math.Min(MeasureText(tail!, 11), 130) + 12;  // 间距 + tail + 右内边距
+        else
+            w += 12;                                 // 右内边距
+        return w;
     }
 
     /// <summary>
@@ -2501,25 +3468,213 @@ public partial class IslandWindow : Window
         return null;
     }
 
+    /// <summary>歌词宽度缓存键：曲目 + 当前句，换曲或换句才失效</summary>
+    private string? _lyricWidthKey;
+    private double _lyricWidthCache;
+
+    /// <summary>
+    /// 胶囊宽度收缩的滞回阈值（未缩放 DIP）。
+    /// 新的一句比当前宽度窄不足这个值时**不缩**，避免每句都抖一下。
+    /// 只有明显变短（长句 → 短句）才真正收窄。
+    /// </summary>
+    private const double WidthShrinkHysteresis = 36;
+
+    /// <summary>
+    /// 本曲"代表性歌词宽度"（未缩放口径）——用于决定胶囊文字列要多宽。
+    ///
+    /// 【为什么不用"当前这句"】旧实现取 <c>CurrentText(当前进度)</c>，于是：
+    ///   · 胶囊宽度只在切歌那一刻按"当时恰好显示的那句"算一次，之后永不重算
+    ///     （UpdatePillLyric 不写 MeasuredWidth，重建又受 MediaSig 守卫限制），
+    ///     即 width 被冻结在一句随机歌词上；
+    ///   · 而 <see cref="MeasurePillWidth"/>（容器宽）每次媒体事件都重算，
+    ///     容器与内部列宽因此脱节：容器宽 > 列宽 → 波形右侧空出一块；
+    ///     容器宽 &lt; 列宽 → 内容越过胶囊右边缘（"挤了波形"）。
+    ///
+    /// 改为取全曲歌词行的第 80 百分位宽度：
+    ///   · 同一首歌内恒定 → 容器与列宽永远一致，也不会每秒抖动；
+    ///   · 换曲才变 → 与 MediaSig 的重建策略天然一致；
+    ///   · 用 p80 而非最大值 → 避免一句超长歌词把胶囊永远顶到上限 420。
+    /// </summary>
+    private double TrackLyricWidth(Sources.MediaSnapshot snap)
+    {
+        if (!_settings.Media.ShowLyrics || !Sources.MediaSourcePolicy.IsMusicPlayer(snap.SourceId))
+            return 0;
+
+        var res = _lyrics.Current;
+        if (res?.Lines == null || res.Lines.Count == 0) return 0;
+
+        // 【按"当前这句"取宽，而不是全曲 p80】
+        // 以前取全曲第 80 百分位宽：同一首歌内恒定，但代价是
+        // 一旦歌里有长句，胶囊就被永久撑到那个宽度 —— 当前句很短时
+        // 右侧留一大片空白（实测《Underwater》标题短、歌词短，胶囊却很长）。
+        //
+        // 现在跟随当前播放位置的那句歌词。为防止"长句→短句"每句抖动，
+        // 加了滞回：明显变短（超过 WidthShrinkHysteresis）才收窄。
+        int posMs = (int)CurrentPositionMs(snap);
+        int idxNow = _lyrics.FindLineIndex(posMs, _lyricOffsetMs);
+        string curText = idxNow >= 0 && idxNow < res.Lines.Count ? res.Lines[idxNow].Text : "";
+        if (string.IsNullOrWhiteSpace(curText))
+        {
+            // 还没到第一句（前奏）：用全曲 p80 撑住基础宽度，避免胶囊忽胖忽瘦
+            return BaseLyricWidth(res);
+        }
+        if (curText.Length > 60) return BaseLyricWidth(res);   // 异常长句不参与定宽
+
+        double need = MeasureText(curText, 11);
+
+        // 缓存键包含"当前这句"，换句即失效 —— 这是宽度能跟随的关键
+        string key = snap.SourceId + "|" + res.Title + "|" + res.Artist + "|" + res.Source
+                   + "|" + idxNow + "|" + curText.Length;
+        // 【纯函数：同一输入必得同一输出】
+        // 之前这里带副作用（写 _lyricWidthCache 并有滞回），而 
+        // BuildMediaPill（构建内容）与 MediaPillWidth（算容器宽）会在不同时刻
+        // 各调一次 —— 两次结果不同就会出现"容器变宽但内部文字列没变"，
+        // 表现为胶囊变宽、歌词仍被裁在词中间，甚至整块溢出屏幕。
+        // 现在只按"当前句"的实测宽度返回，滞回交给调用方（TryResizePillForLyric）处理。
+        if (key == _lyricWidthKey) return _lyricWidthCache;
+
+        _lyricWidthKey = key;
+        _lyricWidthCache = need;
+        return need;
+    }
+
+    /// <summary>
+    /// 全曲歌词的第 80 百分位宽度 —— 只在"还没到第一句"或"当前句异常长"时兜底，
+    /// 保证胶囊有个稳定的基础宽度，不会因为前奏静音而塌成最小宽。
+    /// </summary>
+    private double BaseLyricWidth(Sources.LyricResult res)
+    {
+        var widths = new List<double>(res.Lines.Count);
+        foreach (var ln in res.Lines)
+        {
+            var t = ln.Text;
+            if (string.IsNullOrWhiteSpace(t)) continue;
+            if (t.Length > 60) continue;
+            widths.Add(MeasureText(t, 11));
+        }
+        if (widths.Count == 0) return 0;
+        widths.Sort();
+        int idx = (int)Math.Floor((widths.Count - 1) * 0.8);
+        return widths[Math.Clamp(idx, 0, widths.Count - 1)];
+    }
+
+    /// <summary>
+    /// 换歌词行后，按新的"当前句"重算并应用胶囊宽度。
+    ///
+    /// 【为什么不用 UpdateItem 重建】那条路径会重建整个 ContentPresenter（闪一下）。
+    /// 这里只更新 MeasuredWidth 再请求一次布局，弹簧会平滑地把宽度过渡过去。
+    /// 只有宽度真的变了（超过 1px）才动，避免每句都触发一次布局。
+    /// </summary>
+    private void TryResizePillForLyric(Sources.MediaSnapshot? snap)
+    {
+        if (snap == null) return;
+        var item = _stack.Active;
+        if (item == null || item.Event.Kind != "media") return;
+        if (item.Role != IslandRole.Pill) return;          // 只有胶囊态跟随
+        if (item.Event.Payload is not Sources.MediaSnapshot ms) return;
+
+        // MeasurePillWidth 内部已经同步好三列宽度（见 MediaPillWidth），
+        // 这里只负责判断"总宽是否真的变了"并请求一次重排。
+        double w = MeasurePillWidth(item.Event);
+        if (Math.Abs(w - item.MeasuredWidth) < 1.0) return;
+
+        item.MeasuredWidth = w;
+        _lastLayoutSignature = null;
+
+        // 下一帧布局：此时新歌词已写入，宽度是按这一句算的
+        Dispatcher.BeginInvoke(new Action(() => ApplyLayout(force: true)),
+            System.Windows.Threading.DispatcherPriority.Render);
+    }
+
+    /// <summary>媒体胶囊三列的固定宽度（未缩放口径）</summary>
+    private const double PillCoverColW = 12 + 24 + 8;   // 左内边距 + 封面 + 间距
+    private const double PillWaveColW = 22 + 6;         // 波形 + 左间距
+    private const double PillTailPad = 8;               // 右侧留白
+
+    /// <summary>
+    /// 文本列必须额外预留的"省略号余量"（未缩放 DIP）。
+    ///
+    /// WPF 的 TextBlock 在判断"是否要加省略号"时，会把末尾 "…" 字形的宽度
+    /// 也算进可用宽度里。因此
+    ///     内容宽度 == 可用宽度   →   仍然显示 "…"
+    /// 也就是"量得下却还是被截"。
+    ///
+    /// 【影响范围】任何设了 <see cref="TextTrimming.CharacterEllipsis"/> 的定宽文本列：
+    /// 媒体胶囊的标题 / 作者行、通知胶囊的标题与正文、DSH 胶囊的两行文字。
+    /// 凡是"按内容实测算宽"的地方都要加上它，否则宽度虽算对了仍会被截。
+    /// </summary>
+    private const double EllipsisSlack = 12;
+
+    /// <summary>
+    /// 媒体胶囊的文字列宽度：标题行与歌词行取较宽者，并夹在上限内。
+    /// 【BuildMediaPill 的列宽 与 MediaPillWidth 的胶囊宽度 必须都走这里】
+    /// 否则两处各算各的，就会出现「列比容器宽」→ 内容溢出胶囊（曾实测溢出 78px）。
+    /// </summary>
+    /// <param name="lyricW">
+    /// 已经测好的歌词宽度，由 <see cref="TrackLyricWidth"/> 提供 —— 不接受"当前这句歌词"，
+    /// 以确保同一首歌内、以及"列宽"与"容器宽"两处调用得到完全相同的值。
+    /// 传 0 表示不计歌词（无歌词 / 非音乐播放器 / 未开启歌词）。
+    /// </param>
+    private double MediaPillTextWidth(Sources.MediaSnapshot snap, double lyricW)
+    {
+        double scale = IslandMetrics.Scale <= 0 ? 1.0 : IslandMetrics.Scale;
+        double cap = IslandMetrics.MaxWidth / scale;
+        double maxText = cap - PillCoverColW - PillWaveColW - PillTailPad;
+
+        double titleW = MeasureText(snap.Title, 12.5, true);
+        double artistW = string.IsNullOrWhiteSpace(snap.Artist) ? 0 : MeasureText(snap.Artist!, 11) + 7;
+        double metaW = titleW + artistW;
+
+        // 【余量不能太小】实测：标题需要 98.34 DIP、只分到 101.13（余 2.8）时，
+        // WPF 依然会显示省略号 —— 它判断是否裁剪时会把省略号字形宽度算进去。
+        // 因此至少留一个中文字宽（约 12.5 DIP）的呼吸空间，否则会出现
+        // 「明明量得下却还是被截」。metaW 已含 artist 的 +7 间距，lyricW 不含。
+        //
+        // 【下限 96 而不是 60】60 太窄：波形列(28) + 左侧间距(6) 会贴着文字，
+        // 歌词短到 "So come on" 时胶囊整体收缩，波形就被挤到文字上。
+        // 96 能保证「标题/歌词 + 波形」之间始终有呼吸空间。
+        return Math.Clamp(Math.Max(metaW, lyricW) + 18, 96, maxText);
+    }
+
     /// <summary>
     /// 媒体胶囊目标宽度：把歌词宽度需求算进去（三段式第②步 先加宽）。
     /// 返回未缩放宽度（渲染时乘 Scale）。
     /// </summary>
-    private double MediaPillWidth(Sources.MediaSnapshot snap, string? lyric)
+    private double MediaPillWidth(Sources.MediaSnapshot snap, double lyricW)
     {
-        double icon = 12 + 24 + 8;
-        // 波形实际占宽：4 根柱(2.5×4=10) + 3 个间距(2×3=6) + 与标题的间隔(6)，
-        // 再加右内边距 12 → 共 34。之前只留 14，导致波形被挤出胶囊右边界。
-        double wave = 12 + 10 + 6 + 6;
-        double titleW = MeasureText(snap.Title, 12.5, true);
-        double artistW = string.IsNullOrWhiteSpace(snap.Artist) ? 0 : MeasureText(snap.Artist!, 11) + 7;
-        double metaW = titleW + artistW + wave;
-        double lyricW = string.IsNullOrWhiteSpace(lyric) ? 0 : MeasureText(lyric!, 11);
-
-        double w = icon + Math.Max(metaW, lyricW);
+        // 三列口径与 BuildMediaPill 的 Grid 完全一致：
+        //   封面列 PillCoverColW + 文字列 textW + 波形列(PillWaveColW) + 右留白(PillTailPad)
         double scale = IslandMetrics.Scale <= 0 ? 1.0 : IslandMetrics.Scale;
         double cap = IslandMetrics.MaxWidth / scale;
-        return Math.Clamp(w, IslandMetrics.MinWidth, Math.Min(cap, IslandMetrics.MaxWidth));
+        // 下限不能用 MinWidth(36)：那是"正圆收起"的几何值，
+        // 套在三列媒体胶囊上会让容器比三列之和还窄。
+        double mediaMin = PillCoverColW + PillWaveColW + PillTailPad + 96;
+
+        double total = Math.Clamp(
+            PillCoverColW + PillWaveColW + PillTailPad + MediaPillTextWidth(snap, lyricW),
+            mediaMin, Math.Min(cap, IslandMetrics.MaxWidth));
+
+        // 【关键：由最终总宽反推文字列宽】
+        // 以前容器宽和 columns[1] 是各自独立算出来的，两端还会在不同时刻调用
+        // TrackLyricWidth（它依赖当前播放位置）—— 构建内容时按第 5 句定宽，
+        // 进度走到第 6 句后 MeasurePillWidth 又按第 6 句重算容器，
+        // 于是 textCol.Width 大于 columns[1] 宽，StackPanel 直接溢出到隔壁列，
+        // 把波形盖住（用户看到的就是"挤波形"）。
+        // 现在文字列 = 总宽 - 三列固定宽，三列之和恒等于容器宽，永不溢出。
+        double finalTextW = Math.Max(60, total - PillCoverColW - PillWaveColW - PillTailPad);
+        ApplyMediaPillColumns(finalTextW);
+        return total;
+    }
+
+    /// <summary>
+    /// 把文字列宽同步到当前媒体胶囊的第 1 列与 textCol。
+    /// 只有一处调用（<see cref="MediaPillWidth"/>），保证"容器宽 = 三列之和"这一不变量。
+    /// </summary>
+    private void ApplyMediaPillColumns(double textW)
+    {
+        if (_pillGrid != null && _pillGrid.ColumnDefinitions.Count >= 2)
+            _pillGrid.ColumnDefinitions[1].Width = new GridLength(textW);
+        if (_pillTextCol != null) _pillTextCol.Width = textW;
     }
 
     /// <summary>
@@ -2563,16 +3718,29 @@ public partial class IslandWindow : Window
             _lastLyricText = text!;
             tb.Text = text;
             StopLyricScroll(tb);
+
+            // 【换句 → 重算胶囊宽度】
+            // 宽度改为跟随"当前这句"（见 TrackLyricWidth），因此换句后必须让
+            // 容器重新量一次，否则 _lyricWidthCache 更新了、界面却还停在旧宽度。
+            // 这里只改 MeasuredWidth 并请求一帧布局，不重建内容（重建会闪）。
+            // 仅在播放器胶囊处于 Pill 形态时处理：收起/球体态不需要跟随。
+            TryResizePillForLyric(snap);
         }
 
         // ---- 三段式宽度判断（缩放感知）----
         double scale = IslandMetrics.Scale <= 0 ? 1.0 : IslandMetrics.Scale;
         double need = MeasureText(text!, 11);
         double avail = row.ActualWidth;
+        // avail 是"当前实际可用宽度"，可能已被外层裁剪（MusicPill 是 Auto 列，
+        // 不一定等于胶囊上限），因此只在它是 0 时才回退到上限推算。
         if (avail <= 0) avail = Math.Max(60, IslandMetrics.MaxWidth / scale - 56);
-        double capW = IslandMetrics.MaxWidth / scale - 56;
 
-        bool fits = need <= avail - 1 || need <= capW;
+        // 【只按实际可用宽度判断是否能放下】
+        // 之前写成 need <= avail - 1 || need <= capW：只要歌词不超过胶囊理论上限
+        // 就判定"放得下"，于是返回、不滚动 —— 可当前宽度已经被外层挤窄，
+        // 歌词其实是被裁掉的（表现为"歌词显示不全且不会滚动"）。
+        // 能不能放下只看实际宽度 avail；放不下就交给下面的自动滚动。
+        bool fits = need <= avail - 1;
         if (fits)
         {
             if (_lyricNeedScroll) { StopLyricScroll(tb); _lyricNeedScroll = false; }
@@ -2658,6 +3826,7 @@ public partial class IslandWindow : Window
         RefreshMediaCard();          // 进度条 / 时间 / 播放图标 每帧更新
         UpdatePillLyric(_stack.Active?.Event.Payload as Sources.MediaSnapshot);
         RefreshCardLyric(_stack.Active?.Event.Payload as Sources.MediaSnapshot);
+        ApplyCardTitleScroll();      // 标题超宽时横向滚动（列宽 = 整卡一半）
 
         // 【自适应中心】cx 必须与 IsPointerOverAnyIsland 的命中坐标系严格一致：
         // 命中测试用 GetWindowRect（物理像素）/ DpiScale 反推逻辑坐标，
@@ -2736,8 +3905,11 @@ public partial class IslandWindow : Window
                 // 会被父级拉伸，测出虚高值 —— 表现为卡片下方永远留大片空白。
                 if (wantCard && c != null)
                 {
-                    double sc = IslandMetrics.Scale <= 0 ? 1.0 : IslandMetrics.Scale;
-                    double m = MeasureCardContent(c, cwForCard() / sc);
+                    // 【未缩放口径】WrapWithClose 给整张卡片加了 LayoutTransform(Scale)，
+                    // WPF 会先按未缩放尺寸给 DesiredSize，再放大成布局尺寸。
+                    // 所以这里传 CardWidth 测到的就是未缩放高度，与 ClusterStack 的
+                    // 上限口径一致，不会二次缩放。
+                    double m = MeasureCardContent(c, cwForCard());
                     if (m > 0) item.MeasuredCardHeight = m;
                 }
 
@@ -2896,11 +4068,19 @@ public partial class IslandWindow : Window
                 _pointerOverIsland = true;
                 _pointerEnterAt = DateTime.Now;
             }
+
+            // 3b. 指针停在某颗**球体**上 -> 走"球体 -> 胶囊"提升
+            // 【为什么放在这里】半透明等待期（HoverActivateMs 内）岛是 WS_EX_TRANSPARENT，
+            // 收不到 MouseEnter，所以判定必须落在主动轮询的命中测试里。
+            // 内部自带落定防抖（停留不足 SphereHoverSettleMs 视为横向扫过，不提升）。
+            PollSpherePromotion(IslandUnderCursor());
         }
-        else if (_pointerOverIsland)
+        else
         {
+            PollSpherePromotion(null);
+
             // 连续 LeaveGrace 都没命中才算真的离开
-            if (DateTime.Now - _lastInsideAt > LeaveGrace)
+            if (_pointerOverIsland && DateTime.Now - _lastInsideAt > LeaveGrace)
             {
                 _pointerOverIsland = false;
                 _pointerEnterAt = DateTime.MinValue;
@@ -2985,6 +4165,52 @@ public partial class IslandWindow : Window
         }
         catch (Exception ex) { if (_hitDebug) App.Log("HitDbg", ex); }
         return false;
+    }
+
+    /// <summary>
+    /// 指针当前落在哪一条岛上（null = 都没落中）。
+    /// 与 <see cref="IsPointerOverAnyIsland"/> 同一套物理矩形 + 外扩热区口径。
+    ///
+    /// 【为什么需要它】半透明等待期（HoverActivateMs 内）岛是 WS_EX_TRANSPARENT，
+    /// **收不到任何 WPF 鼠标事件**，所以挂在 MouseEnter 上的球体提升在这段时间里不会触发。
+    /// 而命中轮询是主动 GetCursorPos 探测，穿透状态下照样能跑 ——
+    /// 于是把"球体 -> 胶囊"的判定搬到这里，等待期内也能响应。
+    /// </summary>
+    private string? IslandUnderCursor()
+    {
+        try
+        {
+            if (!WindowChromeHelper.GetWindowRect(
+                    new System.Windows.Interop.WindowInteropHelper(this).Handle, out var wr)) return null;
+            if (!WindowChromeHelper.GetCursorPos(out var pt)) return null;
+            var dpi = VisualTreeHelper.GetDpi(this);
+            double sx = dpi.DpiScaleX <= 0 ? 1 : dpi.DpiScaleX;
+            double sy = dpi.DpiScaleY <= 0 ? 1 : dpi.DpiScaleY;
+
+            string? best = null;
+            double bestArea = double.MaxValue;   // 取面积最小（最贴合）的那条，避免大胶囊盖住小球
+            const double padDip = 6;
+            foreach (var item in _stack.Items)
+            {
+                if (item.IsDying || item.Opacity.Value < 0.3) continue;
+                var v = item.Visual;
+                if (v.Visibility != Visibility.Visible) continue;
+                double cx0 = Canvas.GetLeft(v), cy0 = Canvas.GetTop(v);
+                double ww = v.Width, hh = v.Height;
+                if (double.IsNaN(ww) || double.IsNaN(hh) || ww <= 0 || hh <= 0) continue;
+
+                double x0 = wr.Left + (cx0 - padDip) * sx;
+                double y0 = wr.Top + (cy0 - padDip) * sy;
+                double x1 = wr.Left + (cx0 + ww + padDip) * sx;
+                double y1 = wr.Top + (cy0 + hh + padDip) * sy;
+                if (pt.X < x0 || pt.X > x1 || pt.Y < y0 || pt.Y > y1) continue;
+
+                double area = ww * hh;
+                if (area < bestArea) { bestArea = area; best = item.Event.Id; }
+            }
+            return best;
+        }
+        catch { return null; }
     }
 
     /// <summary>把各岛的物理矩形描述出来（诊断用，可保留）</summary>
@@ -3165,6 +4391,9 @@ public partial class IslandWindow : Window
 
         EnsureHoverExpandTimer();
 
+        // 【球体 -> 胶囊 -> 详情卡】由命中轮询驱动（PollSpherePromotion），
+        // 不在这里做 —— 半透明等待期内收不到 MouseEnter。
+
         if (!HoverExpandOn || _hoverExpandSuppressed) return;
         if (_stack.Active?.Event.Id != id) return;      // 只对当前胶囊生效
         if (_stack.IsExpanded) return;                 // 已经展开了就不必再等
@@ -3198,11 +4427,120 @@ public partial class IslandWindow : Window
         };
     }
 
+    // ---- 球体 -> 胶囊 提升的落定（防抖） ----
+    private string? _sphereHoverId;
+    private DateTime _sphereHoverSince = DateTime.MinValue;
+    private string? _sphereSettleId;
+    private DispatcherTimer? _sphereSettleTimer;
+    /// <summary>
+    /// 本轮是否已经提升过球体。为 true 时不再接受任何新的提升，
+    /// 直到指针完全离开岛所在那一行（由 PollSpherePromotion(null) 清除）——
+    /// 这是阻断"提升 -> 重排 -> 另一球体落进光标 -> 再提升"自激循环的关键。
+    /// </summary>
+    private bool _spherePromoted;
+
+    /// <summary>指针在球体上停留多久才真正提升为胶囊（毫秒）。偏小会误触发，偏大会显得没反应。</summary>
+    private int SphereHoverSettleMs => 120;
+
+    /// <summary>
+    /// 当前状态下是否允许"悬浮球体 -> 胶囊"：
+    /// 半透明穿透期看 HoverSphereInPassive；已放行可交互期看 HoverSphereInInteractive。
+    /// 两者都关 = 完全不响应悬浮球体（只有点击才切换）。
+    /// </summary>
+    private bool HoverSphereEnabledNow
+        => _interactive ? _settings.Island.HoverSphereInInteractive
+                        : _settings.Island.HoverSphereInPassive;
+
+    private void EnsureSphereSettleTimer()
+    {
+        if (_sphereSettleTimer != null) return;
+        _sphereSettleTimer = new DispatcherTimer();
+        _sphereSettleTimer.Tick += (_, _) =>
+        {
+            _sphereSettleTimer!.Stop();
+            var id = _sphereSettleId;
+            _sphereSettleId = null;
+            if (id == null) return;
+            PromoteSphereToPill(id);
+        };
+    }
+    /// <summary>
+    /// 命中轮询驱动：指针停在 id 这颗球上够久就提升为胶囊；离开则取消落定。
+    /// </summary>
+    private void PollSpherePromotion(string? hoverId)
+    {
+        if (string.IsNullOrEmpty(hoverId))
+        {
+            _sphereHoverId = null;
+            _sphereSettleTimer?.Stop();
+            _sphereSettleId = null;
+            _spherePromoted = false;      // 指针已离开整行 -> 重新武装
+            return;
+        }
+
+        // 【两个状态各自独立开关】
+        //   · 被动（半透明穿透）：HoverSphereInPassive
+        //   · 主动（已放行、可交互）：HoverSphereInInteractive
+        // 两者都关 = 完全不响应悬浮球体（回到只有点击才切换的行为）。
+        if (!HoverSphereEnabledNow) return;
+
+        var item = _stack.Items.FirstOrDefault(i => i.Event.Id == hoverId && !i.IsDying);
+        if (item == null || item.Role != IslandRole.Sphere) return;
+        if (_sphereHoverId == hoverId) return;   // 已在落定中
+
+        // 【必须先离开才能再次提升】上一条提升后中央胶囊变宽、其余岛重排，
+        // 别的球体很可能正好落到静止的光标下方 —— 若继续允许提升就会自激：
+        // 提升 -> 重排 -> 另一球体落进光标 -> 再提升 -> 再重排（实测 14 秒抖 26 次）。
+        // 纯"光标移动过"的闸不够（重排本身就会让光标相对各球体移动）。
+        // 因此要求：提升过一次之后，必须**完全离开岛所在那一行**才会重新武装。
+        if (_spherePromoted && hoverId != null) return;
+
+        _sphereHoverId = hoverId;
+        _sphereHoverSince = DateTime.Now;
+        EnsureSphereSettleTimer();
+        _sphereSettleTimer!.Stop();
+        _sphereSettleId = hoverId;
+        _sphereSettleTimer.Interval = TimeSpan.FromMilliseconds(SphereHoverSettleMs);
+        _sphereSettleTimer.Start();
+    }
+
+    /// <summary>真正把球体提升为中央胶囊，并接上"胶囊 -> 详情卡"的展开计时</summary>
+    private void PromoteSphereToPill(string id)
+    {
+        var item = _stack.Items.FirstOrDefault(i => i.Event.Id == id && !i.IsDying);
+        if (item == null || item.Role != IslandRole.Sphere) return;
+        if (_stack.Active?.Event.Id == id) return;   // 已是中央胶囊
+
+        // 记下提升时的光标位置：之后光标不动就不允许再次提升（阻断自激）
+        _spherePromoted = true;   // 本轮已提升，必须先离开整行才会重新武装
+
+        _stack.SetActive(id);
+        _lastLayoutSignature = null;
+        ApplyLayout(force: true);
+        App.LogInfo("Island", $"悬浮球体停留达标 -> 提升为胶囊（{id}）");
+
+        // 提升后接上展开：胶囊 -> 详情卡
+        // 【关键】_hoverId 原本只由 MouseEnter 赋值，而等待期内收不到该事件；
+        // 这里显式补上，否则计时器 Tick 里的 `id != _hoverId` 会直接 return，卡片永远不展开。
+        _hoverId = id;
+        EnsureHoverExpandTimer();
+        if (!HoverExpandOn || _hoverExpandSuppressed) return;
+        if (_stack.IsExpanded) return;
+        _hoverExpandId = id;
+        _hoverExpandTimer!.Stop();
+        _hoverExpandTimer.Interval = TimeSpan.FromMilliseconds(HoverExpandDelayMs);
+        _hoverExpandTimer.Start();
+    }
+
     private void OnItemLeave(string id)
     {
         if (_hoverId == id) _hoverId = null;
         _hoverExpandTimer?.Stop();
         _hoverExpandId = null;
+        // 离开即取消"落定"，避免指针已经走了却还把球体提成胶囊
+        if (_sphereHoverId == id) _sphereHoverId = null;
+        _sphereSettleTimer?.Stop();
+        _sphereSettleId = null;
     }
 
     /// <summary>详情卡上的关闭按钮：收起，并抑制本次悬停的再次自动展开</summary>
