@@ -1178,7 +1178,7 @@ public partial class SettingsWindow : Window
     {
         var sp = new StackPanel();
         sp.Children.Add(Group("时序岛",
-            Desc("Windows 桌面灵动岛 · v0.0.2 开发版"),
+            Desc("Windows 桌面灵动岛 · v0.0.1 开发版"),
             Row("运行环境", ".NET 10 · WPF · Windows 10 19041+", null),
             Row("图标", "assets/icon.ico · 7 个尺寸", null)));
 

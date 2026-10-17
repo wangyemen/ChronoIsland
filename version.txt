@@ -1,8 +1,3 @@
-0.0.2
-https://github.com/wangyemen/ChronoIsland/releases/download/v0.0.2/ChronoIsland-0.0.2-win-x64.zip
-首次支持自动更新：设置 → 通用 → 更新 可检查并安装新版本。
-
-格式说明（发布新版本时只需改这个文件）：
-  第 1 行  版本号，与 ChronoIsland.csproj 的 <Version> 保持一致
-  第 2 行  zip 包的直链（GitHub Releases 上的 asset 地址）
-  其余行  更新说明，原样显示在设置页
+0.0.1
+https://github.com/wangyemen/ChronoIsland/releases/download/v0.0.1/ChronoIsland-0.0.1-win-x64.zip
+首次支持自动更新：设置 → 通用 → 更新 可检查并安装新版本；国内网络下 GitHub 连不上时自动回退 jsDelivr 下载。
