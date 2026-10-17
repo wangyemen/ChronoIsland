@@ -79,7 +79,7 @@ Windows 桌面灵动岛。默认**屏幕上什么都没有**——来通知、�
 | [Lucide](https://lucide.dev) | 界面 26 个矢量图标（ISC） |
 | [jsDelivr](https://www.jsdelivr.com) | 自动更新包备用下载源（国内网络回退） |
 | [FluidBar](https://github.com/search?q=FluidBar&type=repositories) | EventBus 架构、媒体会话优先级、应用图标提取链路 |
-| [Lyricify](https://github.com/LyricifyOS/LyricsHelper) | 歌词多源轮转、KRC / QRC 解密 |
+| [WXRIW/Lyricify-Lyrics-Helper](https://github.com/WXRIW/Lyricify-Lyrics-Helper) | 歌词多源轮转、KRC / QRC 解密（通过 NuGet 包 `Lyricify.Lyrics.Helper` 引入） |
 
 详细许可说明见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
 ## 交互说明

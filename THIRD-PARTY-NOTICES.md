@@ -34,6 +34,18 @@ CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION W
 OR PERFORMANCE OF THIS SOFTWARE.
 ```
 
+## 歌词库：WXRIW/Lyricify-Lyrics-Helper
+
+本项目通过 NuGet 包 `Lyricify.Lyrics.Helper`（0.2.0）引入歌词能力，
+源仓库为 [WXRIW/Lyricify-Lyrics-Helper](https://github.com/WXRIW/Lyricify-Lyrics-Helper)：
+QQ音乐 / 网易云 / 酷狗 / 汽水 / LRCLIB 多源轮转、KRC 与 QRC 歌词解密。
+代码在 `Sources/LyricsProvider.cs` 中作为库使用，不直接修改该库源码。
+
+- 项目：Lyricify-Lyrics-Helper
+- 仓库：<https://github.com/WXRIW/Lyricify-Lyrics-Helper>
+- 引入方式：NuGet 包 `Lyricify.Lyrics.Helper` 0.2.0
+- 用途：歌词多源检索 + KRC / QRC 解密
+
 ## Windows SDK / GSMTC
 
 本项目通过 `Windows.Media.Control` 的 **GlobalSystemMediaTransportControlsSession (GSMTC)**

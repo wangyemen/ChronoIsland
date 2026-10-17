@@ -1194,9 +1194,9 @@ public partial class SettingsWindow : Window
             OpenSourceRow("FluidBar",
                 "媒体 / 通知 / 图标提取等多处架构借鉴（EventBus、会话优先级、AUMID→进程→窗口图标链路）。",
                 "https://github.com/search?q=FluidBar&type=repositories"),
-            OpenSourceRow("Lyricify",
-                "歌词获取：QQ音乐 / 网易云 / 酷狗 / 汽水 / LRCLIB 多源轮转、KRC 与 QRC 解密。",
-                "https://github.com/LyricifyOS/LyricsHelper")));
+            OpenSourceRow("WXRIW/Lyricify-Lyrics-Helper",
+                "歌词获取：QQ音乐 / 网易云 / 酷狗 / 汽水 / LRCLIB 多源轮转、KRC 与 QRC 解密（NuGet 包 Lyricify.Lyrics.Helper）。",
+                "https://github.com/WXRIW/Lyricify-Lyrics-Helper")));
 
         var openBtn = new Button { Content = "打开数据目录", Style = (Style)FindResource("Pill"),
             HorizontalAlignment = HorizontalAlignment.Left };
