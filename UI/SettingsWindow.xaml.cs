@@ -42,7 +42,11 @@ public partial class SettingsWindow : Window
 
         // 数据页每 5 秒刷新
         _dataTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
-        _dataTimer.Tick += (_, _) => { if (_page == "usage") RenderPage(); };
+        _dataTimer.Tick += (_, _) =>
+        {
+            // 这几个页面显示的是"当前系统状态"，需要跟着采样结果刷新
+            if (_page is "usage" or "power" or "network" or "mic") RenderPage();
+        };
         _dataTimer.Start();
         Closed += (_, _) => _dataTimer.Stop();
 
@@ -83,6 +87,10 @@ public partial class SettingsWindow : Window
             "media" => ("媒体控制", "会话选择与显示行为", BuildMediaPage()),
             "notify" => ("通知接管", "在灵动岛显示系统通知", BuildNotifyPageWithQuery()),
             "sys" => ("系统状态", "键位翻转 · 解锁进入桌面 · 摄像头占用", BuildSysPage()),
+            "power" => ("电源与电池", "插拔电源 / 低电量 / 充满提醒", BuildPowerPage()),
+            "network" => ("无线与网络", "Wi-Fi · 网速 · 移动热点 · 飞行模式", BuildNetworkPage()),
+            "mic" => ("麦克风", "有程序开始 / 停止录音时提醒（隐私保护）", BuildMicPage()),
+            "themeSwitch" => ("外观切换提示", "深色 / 浅色切换时在岛上确认（太阳 / 月亮）", BuildThemeSwitchPage()),
             "dsh" => ("DeepSeek Harness", "在灵动岛显示 DSH 的工作状态（只读，不改 DSH）", BuildDshPage()),
             "theme" => ("主题与材质", "深浅色与玻璃效果", BuildThemePage()),
             "anim" => ("动画", "弹簧物理参数", BuildAnimPage()),
@@ -166,9 +174,27 @@ public partial class SettingsWindow : Window
     private CheckBox Toggle(bool value, Action<bool> changed)
     {
         var cb = new CheckBox { Style = (Style)FindResource("Toggle"), IsChecked = value };
-        cb.Checked += (_, _) => { if (_loading) return; changed(true); _settings.Save(); };
-        cb.Unchecked += (_, _) => { if (_loading) return; changed(false); _settings.Save(); };
+        cb.Checked += (_, _) => { if (_loading) return; changed(true); _settings.Save(); PushToIsland(); };
+        cb.Unchecked += (_, _) => { if (_loading) return; changed(false); _settings.Save(); PushToIsland(); };
         return cb;
+    }
+
+    /// <summary>
+    /// 把设置推给灵动岛（含各数据源的开关 / TTL）。
+    ///
+    /// 【为什么每个控件都要调】灵动岛持有的是**自己那份 Settings 实例**，
+    /// 设置窗口改了字段并不会自动同步过去。以前只靠"保存"按钮推送，
+    /// 于是打开开关后要重启程序才生效 —— 对这些"打开就该立刻能看到效果"的
+    /// 状态类模块（电源 / 网络 / 麦克风）尤其别扭。现在改完即生效。
+    /// </summary>
+    private void PushToIsland()
+    {
+        foreach (Window win in Application.Current.Windows)
+            if (win is IslandWindow iw)
+            {
+                iw.ApplySourceSettings(_settings);
+                break;
+            }
     }
 
     private StackPanel SliderRow(string label, double val, double min, double max,
@@ -199,6 +225,7 @@ public partial class SettingsWindow : Window
             changed(e.NewValue);
             // 立即落盘：不依赖防抖定时器，避免窗口关闭时丢改动
             _settings.Save();
+            PushToIsland();
             App.LogInfo("Settings", $"{label} = {e.NewValue}");
         };
 
@@ -321,6 +348,161 @@ public partial class SettingsWindow : Window
             PreviewRow("数字键盘", "numlock"),
             PreviewRow("解锁进入桌面", "unlock"),
             PreviewRow("摄像头占用", "camera")));
+
+        return sp;
+    }
+
+    // ================= 电源 / 网络 / 麦克风 / 外观切换（docs §5.8–§5.13） =================
+
+    /// <summary>
+    /// 电源与电池页。台式机（无电池）会在顶部直接说明"本机没有电池，功能静默"，
+    /// 而不是留一堆点了没反应的开关 —— 这是最容易让人困惑的地方。
+    /// </summary>
+    private UIElement BuildPowerPage()
+    {
+        var sp = new StackPanel();
+        var p = _settings.Power;
+        var bat = Sources.SystemStatusSource.LatestBattery;
+
+        sp.Children.Add(Group("当前状态",
+            Row("电池", bat == null ? "尚未采样"
+                : bat.HasBattery
+                    ? $"{bat.Percent}% · {(bat.Charging ? "充电中" : bat.AcOnline ? "已接电源" : "使用电池")}"
+                    : "本机没有电池（台式机）", null),
+            Row("节电模式", bat == null ? "—" : bat.SaverOn ? "已开启" : "关闭", null)));
+
+        if (bat != null && !bat.HasBattery)
+            sp.Children.Add(Group("提示", Desc(
+                "本机未检测到电池，电源相关的提醒会自动静默 —— 不会弹任何岛，"
+                + "也不需要关闭开关。接上移动电源的笔记本会在插拔时正常提醒。")));
+
+        sp.Children.Add(Group("总开关",
+            Row("启用电源提醒", "关闭后不监控电池与供电状态",
+                Toggle(p.Enabled, v => p.Enabled = v)),
+            SliderRow("胶囊停留时长", p.TtlSeconds, 2, 12, "秒", v => p.TtlSeconds = (int)v)));
+
+        sp.Children.Add(Group("提醒时机", Desc(
+            "每个放电 / 充电周期各自只提醒一次，避免反复打断。"),
+            Row("插拔电源 / 充电状态变化", "接上电源、拔掉电源、开始或停止充电时提醒",
+                Toggle(p.NotifyPlug, v => p.NotifyPlug = v)),
+            Row("低电量提醒", $"电量降到 {p.LowPercent}% 及以下且未充电时提醒一次",
+                Toggle(p.NotifyLow, v => p.NotifyLow = v)),
+            SliderRow("低电量阈值", p.LowPercent, 5, 50, "%", v => p.LowPercent = (int)v),
+            Row("充满提醒", "接电充到 100% 时提醒一次",
+                Toggle(p.NotifyFull, v => p.NotifyFull = v))));
+
+        sp.Children.Add(Group("预览", Desc("立即在灵动岛弹一条示例。"),
+            PreviewRow("电池（充电中）", "battery"),
+            PreviewRow("电池（低电量）", "battery-low")));
+
+        return sp;
+    }
+
+    /// <summary>无线与网络页：Wi-Fi / 网速 / 移动热点 / 飞行模式</summary>
+    private UIElement BuildNetworkPage()
+    {
+        var sp = new StackPanel();
+        var n = _settings.Network;
+        var wifi = Sources.SystemStatusSource.LatestWifi;
+        var hot = Sources.SystemStatusSource.LatestHotspot;
+        var radio = Sources.SystemStatusSource.LatestRadio;
+
+        sp.Children.Add(Group("当前状态",
+            Row("Wi-Fi", wifi == null ? "尚未采样"
+                : wifi.Connected ? $"{wifi.Ssid} · 信号 {wifi.SignalPercent}% · {wifi.LinkMbps:0} Mbps"
+                : wifi.WifiRadioOn ? "未连接（网卡已启用）" : "无线网卡已关闭", null),
+            Row("移动热点", hot == null ? "尚未采样"
+                : !hot.Supported ? "本机没有无线网卡，功能静默"
+                : hot.On ? $"已开启 · {hot.Clients} 台设备在线" : "未开启", null),
+            Row("飞行模式", radio == null ? "尚未采样" : radio.AirplaneMode ? "开启" : "关闭", null)));
+
+        sp.Children.Add(Group("总开关",
+            Row("启用网络提醒", "关闭后不监控 Wi-Fi / 热点 / 飞行模式",
+                Toggle(n.Enabled, v => n.Enabled = v)),
+            SliderRow("胶囊停留时长", n.TtlSeconds, 2, 12, "秒", v => n.TtlSeconds = (int)v)));
+
+        sp.Children.Add(Group("Wi-Fi 连接与网速", Desc(
+            "网速取全系统合计（含有线），每秒采样一次差分得出上下行速率。\n"
+            + "「常驻显示网速」开启后，连上 Wi-Fi 的岛不会自动收起，胶囊里持续刷新 ↓/↑ 数字。"),
+            Row("连上 / 断开 / 切换 Wi-Fi 时提醒", "换网时也会提醒",
+                Toggle(n.Wifi, v => n.Wifi = v)),
+            Row("常驻显示实时网速", "开启后 Wi-Fi 岛保持显示（不自动收起）",
+                Toggle(n.PinSpeed, v => n.PinSpeed = v)),
+            PreviewRow("网速示例", "wifi")));
+
+        sp.Children.Add(Group("移动热点",
+            Desc("读取系统自带热点（ICS）的已连接设备数：热点启用后桌面会多出一块"
+                 + "「Wi-Fi Direct」虚拟网卡，接入设备出现在它的邻居表里。不依赖任何权限，"
+                 + "对系统设置里开启的热点同样有效。"),
+            Row("设备上下线 / 热点开关时提醒", hot != null && !hot.Supported
+                    ? "本机没有无线网卡，此开关不会生效"
+                    : "有设备接入或离开时弹一条",
+                Toggle(n.Hotspot, v => n.Hotspot = v)),            PreviewRow("热点示例", "hotspot")));
+
+        sp.Children.Add(Group("飞行模式", Desc(
+            "状态读自系统的无线电管理（与设置界面那个开关同一份状态）。\n"
+            + "飞行模式下单独打开 Wi-Fi 时，胶囊会如实标注「开启 · Wi-Fi 可用」。"),
+            Row("打开 / 关闭飞行模式时提醒", "也包括飞行模式下单独开关 Wi-Fi",
+                Toggle(n.Airplane, v => n.Airplane = v)),
+            PreviewRow("飞行模式示例", "airplane")));
+
+        return sp;
+    }
+
+    /// <summary>麦克风占用页（docs §5.12）</summary>
+    private UIElement BuildMicPage()
+    {
+        var sp = new StackPanel();
+        var m = _settings.Mic;
+        var mic = Sources.SystemStatusSource.LatestMic;
+
+        sp.Children.Add(Group("当前状态",
+            Row("麦克风", mic == null ? "尚未采样"
+                : mic.Busy ? $"使用中 · {mic.AppName}" + (mic.Users > 1 ? $" 等 {mic.Users} 个程序" : "")
+                : "空闲", null)));
+
+        sp.Children.Add(Group("总开关",
+            Row("麦克风占用提醒", "有程序开始 / 停止使用麦克风时在岛上提醒",
+                Toggle(m.Enabled, v => m.Enabled = v)),
+            SliderRow("胶囊停留时长", m.TtlSeconds, 2, 12, "秒", v => m.TtlSeconds = (int)v)));
+
+        sp.Children.Add(Group("检测原理", Desc(
+            "读 Windows 的隐私授权库（HKCU\\…\\CapabilityAccessManager\\ConsentStore\\microphone）："
+            + "每个程序记录 LastUsedTimeStart / LastUsedTimeStop，Stop = 0 表示此刻仍在用。\n"
+            + "系统设置的「隐私 → 麦克风 → 最近活动」页读的就是这份数据，所以它天然可信，"
+            + "且**不会打开麦克风设备**，不会打断正在录音的程序。\n\n"
+            + "值级忽略与摄像头一致：忽略「使用中」后，换成另一个程序再录音仍会弹出。")));
+
+        sp.Children.Add(Group("预览", Desc("立即在灵动岛弹一条示例。"),
+            PreviewRow("麦克风被占用", "mic"),
+            PreviewRow("麦克风已释放", "mic-off")));
+
+        return sp;
+    }
+
+    /// <summary>外观切换提示页（docs §5.13）</summary>
+    private UIElement BuildThemeSwitchPage()
+    {
+        var sp = new StackPanel();
+        var ts = _settings.ThemeSwitch;
+
+        sp.Children.Add(Group("总开关",
+            Row("深色 / 浅色切换时提醒", "同一个信号用太阳（浅色）与月亮（深色）两个图标表达",
+                Toggle(ts.Enabled, v => ts.Enabled = v)),
+            Row("在岛上提示", "关闭后仍然记录模式，只是不弹岛",
+                Toggle(ts.NotifyOnSwitch, v => ts.NotifyOnSwitch = v)),
+            SliderRow("胶囊停留时长", ts.TtlSeconds, 2, 10, "秒", v => ts.TtlSeconds = (int)v)));
+
+        sp.Children.Add(Group("说明", Desc(
+            "触发点是**外观真的从深变浅 / 从浅变深**的那一刻：\n"
+            + "  · 在设置里切换「深色 / 浅色」，或系统里改 Windows 模式 → 弹岛\n"
+            + "  · 「跟随系统」下系统主题变化 → 弹岛\n"
+            + "  · 同色系内刷新（改缩放、切材质、程序启动）→ 不弹\n\n"
+            + "详情卡里可以直接一键切到另一种外观，或改回「跟随系统」。")));
+
+        sp.Children.Add(Group("预览", Desc("立即在灵动岛弹一条示例。"),
+            PreviewRow("浅色模式（太阳）", "theme-light"),
+            PreviewRow("深色模式（月亮）", "theme-dark")));
 
         return sp;
     }
@@ -1186,7 +1368,7 @@ public partial class SettingsWindow : Window
         sp.Children.Add(Group("致谢 · 使用的开源项目",
             Desc("感谢以下开源项目。没有它们，时序岛不会是这个样子。点击任意一行可跳到仓库主页。"),
             OpenSourceRow("Lucide",
-                "界面全部矢量图标（26 个 SVG，运行时由自研渲染器解析）。",
+                "界面全部矢量图标（48 个 SVG，运行时由自研渲染器解析）。",
                 "https://github.com/lucide-icons/lucide"),
             OpenSourceRow("jsDelivr",
                 "更新包的备用下载源。GitHub 官方资产链连不上时自动回退到 jsDelivr 等价直链。",
@@ -1355,6 +1537,13 @@ public partial class SettingsWindow : Window
         _settings.Notification = fresh.Notification; _settings.Usage = fresh.Usage;
         _settings.Media = fresh.Media; _settings.Game = fresh.Game; _settings.General = fresh.General;
         _settings.Sys = fresh.Sys;
+        // 0.0.1 新增的四组（电源 / 网络 / 麦克风 / 外观切换）也要一起复位，
+        // 漏掉任何一组都会出现"点恢复默认，某几个开关却还停在旧值"。
+        _settings.Power = fresh.Power;
+        _settings.Network = fresh.Network;
+        _settings.Mic = fresh.Mic;
+        _settings.ThemeSwitch = fresh.ThemeSwitch;
+        _settings.Dsh = fresh.Dsh;
         _settings.Save();
         App.ApplyTheme(_settings.Theme.Mode);
         foreach (Window win in Application.Current.Windows)
@@ -1369,9 +1558,14 @@ public partial class SettingsWindow : Window
         _settings.Save();
         App.LogInfo("Settings",
             $"已保存：Top={_settings.Island.Top} MaxWidth={_settings.Island.MaxWidth} Scale={_settings.Island.Scale}");
-        // 重新应用到灵动岛（确保保存的值生效）
+        // 重新应用到灵动岛（几何 + 各数据源开关，确保保存的值立即生效）
         foreach (Window win in Application.Current.Windows)
-            if (win is IslandWindow iw) { iw.ApplyGeometrySettings(_settings); break; }
+            if (win is IslandWindow iw)
+            {
+                iw.ApplyGeometrySettings(_settings);
+                iw.ApplySourceSettings(_settings);
+                break;
+            }
         ShowStatus("已保存");
         Close();
     }

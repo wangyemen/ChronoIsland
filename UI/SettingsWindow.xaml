@@ -286,6 +286,27 @@
                                         <TextBlock Text="系统状态" VerticalAlignment="Center"/>
                                     </StackPanel>
                                 </ListBoxItem>
+                                <ListBoxItem Tag="power">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="&#xE83F;" FontFamily="Segoe MDL2 Assets" FontSize="13"
+                                                   Width="18" VerticalAlignment="Center"/>
+                                        <TextBlock Text="电源与电池" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </ListBoxItem>
+                                <ListBoxItem Tag="network">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="&#xE701;" FontFamily="Segoe MDL2 Assets" FontSize="13"
+                                                   Width="18" VerticalAlignment="Center"/>
+                                        <TextBlock Text="无线与网络" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </ListBoxItem>
+                                <ListBoxItem Tag="mic">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="&#xE720;" FontFamily="Segoe MDL2 Assets" FontSize="13"
+                                                   Width="18" VerticalAlignment="Center"/>
+                                        <TextBlock Text="麦克风" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </ListBoxItem>
                                 <ListBoxItem Tag="dsh">
                                     <StackPanel Orientation="Horizontal">
                                         <TextBlock Text="&#xE945;" FontFamily="Segoe MDL2 Assets" FontSize="13"
@@ -312,6 +333,13 @@
                                         <TextBlock Text="&#xE945;" FontFamily="Segoe MDL2 Assets" FontSize="13"
                                                    Width="18" VerticalAlignment="Center"/>
                                         <TextBlock Text="动画" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </ListBoxItem>
+                                <ListBoxItem Tag="themeSwitch">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="&#xE706;" FontFamily="Segoe MDL2 Assets" FontSize="13"
+                                                   Width="18" VerticalAlignment="Center"/>
+                                        <TextBlock Text="外观切换提示" VerticalAlignment="Center"/>
                                     </StackPanel>
                                 </ListBoxItem>
                             </ListBox>

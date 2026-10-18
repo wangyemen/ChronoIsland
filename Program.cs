@@ -188,6 +188,11 @@ public static class Program
             PillWidthDiag.Run();
             return;
         }
+        if (args.Length > 0 && args[0] == "mediaiso")
+        {
+            MediaIsolationDiag.Run();
+            return;
+        }
         if (args.Length > 0 && args[0] == "geom")
         {
             var s = Core.Settings.Load();
@@ -205,6 +210,27 @@ public static class Program
         if (args.Length > 0 && args[0] == "icon")
         {
             IconDiag.Run();
+            return;
+        }
+        if (args.Length > 0 && args[0] == "sysprobe")
+        {
+            SysProbeDiag.Run();
+            return;
+        }
+        if (args.Length > 0 && args[0] == "sysrender")
+        {
+            SystemRenderDiag.Run(args.Length > 1 ? args[1] : "");
+            return;
+        }
+        if (args.Length > 0 && args[0] == "sysdiff")
+        {
+            SysDiffDiag.Run();
+            return;
+        }
+        if (args.Length > 0 && args[0] == "sysisland")
+        {
+            int sec = args.Length > 1 && int.TryParse(args[1], out var ss) ? ss : 14;
+            SysIslandDiag.Run(sec);
             return;
         }
         if (args.Length > 0 && args[0] == "--restore-notifications")

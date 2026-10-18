@@ -39,10 +39,16 @@ public static class SvgIcons
     /// <summary>可用图标名（设置页枚举与文档用）</summary>
     public static readonly string[] Names =
     {
+        // ---- 通用 / 原有 ----
         "bell", "bell-off", "camera", "camera-off", "capslock", "check", "clock", "close",
         "eye", "eye-off", "info", "keyboard", "lock", "monitor",
         "music", "next", "numlock", "pause", "play", "power", "prev",
-        "scrolllock", "settings", "shield", "sparkles", "target", "timer", "unlock"
+        "scrolllock", "settings", "shield", "sparkles", "target", "timer", "unlock",
+        // ---- 0.0.1 系统状态补充（电源 / 网络 / 麦克风 / 外观）----
+        "mic", "mic-off", "battery", "battery-low", "battery-full", "battery-charging",
+        "plug", "wifi", "wifi-off", "router", "plane", "sun", "moon", "sun-moon",
+        "arrow-down", "arrow-up", "smartphone", "gauge",
+        "signal-high", "signal-medium", "signal-low", "signal-zero"
     };
 
     /// <summary>Lucide 统一 viewBox 边长</summary>

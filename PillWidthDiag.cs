@@ -56,6 +56,16 @@ public static class PillWidthDiag
             ("解锁",      MakeUnlock),
             ("DSH",       MakeDsh),
             ("媒体",      MakeMedia),
+            // ---- 系统状态类（docs §5.8–§5.13）----
+            ("麦克风",    () => MakeMic(true)),
+            ("电池",      () => MakeBattery(85, true, true)),
+            ("电池低",    () => MakeBattery(18, false, false)),
+            ("Wi-Fi",     () => MakeWifi(true)),
+            ("Wi-Fi断",   () => MakeWifi(false)),
+            ("热点",      () => MakeHotspot(2)),
+            ("飞行模式",  () => MakeAirplane(true, false)),
+            ("深色模式",  () => MakeTheme(true)),
+            ("浅色模式",  () => MakeTheme(false)),
         };
 
         int fail = 0;
@@ -267,4 +277,59 @@ public static class PillWidthDiag
               Policy: new Core.IslandPolicy(null),
               Payload: new Sources.MediaSnapshot("Spotify", "Spotify", "心跳",
                   "Leehom Wang 林俊杰", "新歌·心跳", true, 30, 60_000_000L, 240_000_000L));
+
+    // ---------------- 系统状态类样例（docs §5.8–§5.13） ----------------
+    // 每类给"内容最长"的组合：尾巴/占用者名最长时才最能暴露宽度公式与排版的脱节。
+
+    private static Core.IslandEvent MakeMic(bool busy)
+        => new Core.IslandEvent("mic", "mic", "mic", 3,
+              busy ? "麦克风被占用" : "麦克风已释放",
+              busy ? "WeChat 正在使用" : "已没有程序在录音",
+              Policy: new Core.IslandPolicy(TimeSpan.FromSeconds(4)),
+              Payload: new ChronoIsland.Native.MicSnapshot(busy, busy ? "WeChat" : "", busy ? 1 : 0))
+        { AppKey = "mic" };
+
+    private static Core.IslandEvent MakeBattery(int percent, bool charging, bool ac)
+        => new Core.IslandEvent("battery", "battery", "battery", 3,
+              charging ? "已接通电源" : "已改用电池",
+              $"{percent}%",
+              Policy: new Core.IslandPolicy(TimeSpan.FromSeconds(4)),
+              Payload: new ChronoIsland.Native.BatterySnapshot(true, percent, charging, ac,
+                  charging ? 3600 : 5400, false))
+        { AppKey = "battery" };
+
+    private static Core.IslandEvent MakeWifi(bool connected)
+        => new Core.IslandEvent("wifi", "wifi", "wifi", 3,
+              connected ? "已连接 Wi-Fi" : "Wi-Fi 已断开",
+              connected ? "JCG_WLAN" : "网络不可用",
+              Policy: new Core.IslandPolicy(TimeSpan.FromSeconds(4)),
+              // 带流量：胶囊里会出现 ↓/↑ 两段速率，是宽度最长的情况
+              Payload: new ChronoIsland.Native.WifiSnapshot(connected,
+                  connected ? "JCG_WLAN" : "", 88, 344,
+                  connected ? 12_500_000 : 0, connected ? 2_100_000 : 0, true))
+        { AppKey = "wifi" };
+
+    private static Core.IslandEvent MakeHotspot(int clients)
+        => new Core.IslandEvent("hotspot", "hotspot", "hotspot", 3,
+              "移动热点已开启", $"{clients} 台设备已连接",
+              Policy: new Core.IslandPolicy(TimeSpan.FromSeconds(4)),
+              Payload: new ChronoIsland.Native.HotspotSnapshot(true, clients,
+                  Enumerable.Range(1, clients).Select(i => $"192.168.137.{20 + i}").ToList(), true))
+        { AppKey = "hotspot" };
+
+    private static Core.IslandEvent MakeAirplane(bool on, bool wifiOn)
+        => new Core.IslandEvent("airplane", "airplane", "airplane", 3,
+              on ? "飞行模式已开启" : "飞行模式已关闭",
+              on ? (wifiOn ? "无线已关闭 · Wi-Fi 仍开启" : "所有无线连接已关闭") : "无线连接已恢复",
+              Policy: new Core.IslandPolicy(TimeSpan.FromSeconds(4)),
+              Payload: new ChronoIsland.Native.RadioSnapshot(on, wifiOn))
+        { AppKey = "airplane" };
+
+    private static Core.IslandEvent MakeTheme(bool dark)
+        => new Core.IslandEvent("theme", "theme", "theme", 1,
+              dark ? "已切换到深色" : "已切换到浅色",
+              dark ? "跟随系统 · 深色" : "跟随系统 · 浅色",
+              Policy: new Core.IslandPolicy(TimeSpan.FromSeconds(3)),
+              Payload: new Sources.ThemeSnapshot(dark, dark ? "跟随系统 · 深色" : "跟随系统 · 浅色"))
+        { AppKey = "theme" };
 }

@@ -124,34 +124,23 @@ public partial class App : System.Windows.Application
         catch (Exception ex) { Log("Theme", ex); }
     }
 
-    /// <summary>普通信息日志（诊断用）</summary>
+    /// <summary>
+    /// 普通信息日志（诊断用）。
+    /// 【0.0.2】写入统一收口到 <see cref="Core.Log"/>：单一出口 + 1 MB × 2 滚动（docs §6/§10）。
+    /// 本方法保留为薄转发，是为了不动散布全仓的 60+ 处调用点。
+    /// </summary>
     public static void LogInfo(string scope, string message)
-    {
-        try
-        {
-            var dir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "ChronoIsland", "logs");
-            Directory.CreateDirectory(dir);
-            File.AppendAllText(Path.Combine(dir, "app.log"),
-                $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [{scope}] {message}\n",
-                System.Text.Encoding.UTF8);
-        }
-        catch { }
-    }
+        => Core.Log.Info(scope, message);
 
+    /// <summary>警告级日志（可诊断但不影响运行）</summary>
+    public static void LogWarn(string scope, string message)
+        => Core.Log.Warn(scope, message);
+
+    /// <summary>调试级日志（默认不落盘，CHRONO_LOG=Debug 才写）</summary>
+    public static void LogDebug(string scope, string message)
+        => Core.Log.Debug(scope, message);
+
+    /// <summary>异常日志</summary>
     internal static void Log(string scope, Exception ex)
-    {
-        try
-        {
-            var dir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "ChronoIsland", "logs");
-            Directory.CreateDirectory(dir);
-            File.AppendAllText(Path.Combine(dir, "app.log"),
-                $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [{scope}] {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}\n\n",
-                System.Text.Encoding.UTF8);
-        }
-        catch { /* 日志失败不影响运行 */ }
-    }
+        => Core.Log.Error(scope, ex);
 }

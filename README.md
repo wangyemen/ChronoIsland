@@ -40,7 +40,7 @@ Windows 桌面灵动岛。默认**屏幕上什么都没有**——来通知、�
 | 引入方式 | 只下载 SVG 源文件，**不引入任何 JS / 字体 / 运行时依赖** |
 | 本项目改动 | 仅去掉 `class` 属性、`stroke-width` 由 2 微调为 1.75；**几何路径原样保留** |
 
-图标文件在 <Assets/Icons/>（26 个 `.svg`），每个文件首行都保留了出处注释：
+图标文件在 <Assets/Icons/>（48 个 `.svg`），每个文件首行都保留了出处注释：
 
 ```
 <!-- play — Lucide play (ISC License, https://lucide.dev) -->
@@ -51,11 +51,19 @@ Windows 桌面灵动岛。默认**屏幕上什么都没有**——来通知、�
 
 这样做的直接好处：**不再依赖 `Segoe MDL2 Assets` 系统字体**，跨 Windows 版本渲染一致，且可换色、可换粗细。
 
-**新增图标**：把 Lucide 的 `<name>.svg` 放进 <Assets/Icons/> 重新构建即可，**无需改任何代码**。
+**新增图标**：把 Lucide 的 `<name>.svg` 放进 <Assets/Icons/> 重新构建即可；若想在代码里按名字取用，
+再往 `Native/SvgIcons.Names` 里登记一下（该数组用于核对与设置页枚举）。
 
-图标清单：`bell` `bell-off` `camera` `camera-off` `capslock` `clock` `close` `eye` `eye-off` `info`
-`keyboard` `lock` `monitor` `music` `next` `numlock` `pause` `play` `power` `prev`
-`scrolllock` `settings` `shield` `target` `timer` `unlock`
+图标清单（48 个）：
+
+| 分组 | 图标 |
+| --- | --- |
+| 基础 | `bell` `bell-off` `camera` `camera-off` `capslock` `check` `clock` `close` `eye` `eye-off` `info` `keyboard` `lock` `monitor` `music` `next` `numlock` `pause` `play` `power` `prev` `scrolllock` `settings` `shield` `sparkles` `target` `timer` `unlock` |
+| 麦克风 | `mic` `mic-off` |
+| 电源 / 电池 | `battery` `battery-low` `battery-full` `battery-charging` `plug` |
+| 网络 | `wifi` `wifi-off` `router` `signal-high` `signal-medium` `signal-low` `signal-zero` `gauge` `arrow-down` `arrow-up` `smartphone` |
+| 飞行模式 | `plane` |
+| 深浅色 | `sun` `moon` `sun-moon`（一个太阳 + 一个月亮，深浅共用一个） |
 
 ### 自动更新备用下载源：jsDelivr（MIT / 开源 CDN）
 
@@ -76,7 +84,7 @@ Windows 桌面灵动岛。默认**屏幕上什么都没有**——来通知、�
 
 | 项目 | 用途 |
 | --- | --- |
-| [Lucide](https://lucide.dev) | 界面 26 个矢量图标（ISC） |
+| [Lucide](https://lucide.dev) | 界面 48 个矢量图标（ISC） |
 | [jsDelivr](https://www.jsdelivr.com) | 自动更新包备用下载源（国内网络回退） |
 | [FluidBar](https://github.com/search?q=FluidBar&type=repositories) | EventBus 架构、媒体会话优先级、应用图标提取链路 |
 | [WXRIW/Lyricify-Lyrics-Helper](https://github.com/WXRIW/Lyricify-Lyrics-Helper) | 歌词多源轮转、KRC / QRC 解密（通过 NuGet 包 `Lyricify.Lyrics.Helper` 引入） |
@@ -156,7 +164,25 @@ SDK 与 NuGet 缓存都在项目内 `.tools`，不写入 C 盘。
 - [x] M6 使用时长统计
 - [x] M7 媒体显示与控制
 - [x] M8 游戏隐藏 + 后台静默
+- [x] M9 系统状态（键位 / 解锁 / 摄像头）+ Lucide 矢量图标 + 悬浮自动展开 + 启动入场队列
+- [x] M10 系统状态扩展六项（设计文档 §5.8–§5.13）：
+  - [x] **电池 / 电源** — 插拔电源、充放电切换、低电量、充满（每周期只提醒一次）
+  - [x] **Wi-Fi 连接与实时网速** — SSID / 信号 / 协商速率，上下行速率每帧刷新（可常驻）
+  - [x] **移动热点连接数** — 读 ICS 邻居表，设备接入 / 离开实时可见
+  - [x] **飞行模式开关** — 同时区分「飞行模式下单独开 Wi-Fi」
+  - [x] **麦克风占用提醒** — 读隐私授权库，零副作用，值级忽略与摄像头同语义
+  - [x] **深色 / 浅色切换提示** — 太阳月亮合成图标 `sun-moon`，深浅共用一条岛
 - [x] 设置界面（玻璃拟态 + 弹簧动效）· 托盘 · 应用图标
 - [x] 媒体：真实 GSMTC（遍历全部会话 + 优先级排序 + 浏览器降级）
 - [x] **应用图标提取**：AUMID → 进程 → 窗口 WM_GETICON → exe 图标 → LRU 缓存
-- [x] 通知 / 时钟 / 时长 / 媒体的胶囊内容渲染
+- [x] 通知 / 时钟 / 时长 / 媒体 / 系统状态的胶囊内容渲染
+
+## 诊断命令（系统状态扩展）
+
+```bat
+ChronoIsland.exe sysprobe      :: 五类快照的真实读数
+ChronoIsland.exe sysdiff       :: 差分逻辑（注入假快照，不改机器状态）
+ChronoIsland.exe sysrender     :: 六类岛渲染 → PNG + 宽度 / 墨迹边距自检
+ChronoIsland.exe sysisland     :: 在线链路（源 → 总线 → 栈）
+ChronoIsland.exe pillwidth     :: 全部胶囊宽度公式 vs 排版
+```

@@ -40,6 +40,10 @@ public partial class IslandWindow : Window
     private Sources.MediaSource? _media;
     private Sources.SysStateSource? _sys;   // 键位 + 会话解锁（docs §5.5）
     private Sources.DshSource? _dsh;        // DeepSeek Harness 工作状态（只读投影缓存）
+    /// <summary>电池 / Wi-Fi / 热点 / 飞行模式 / 麦克风（docs §5.8–§5.12）</summary>
+    private Sources.SystemStatusSource? _system;
+    /// <summary>深浅色切换（docs §5.13）</summary>
+    private Sources.ThemeSwitchSource? _themeSwitch;
     /// <summary>
     /// 进度条轨道的"未缩放"排版宽度。
     /// 卡片内容在未缩放坐标系里排版（CardWidth 宽 - 左右各 16 内边距），
@@ -346,6 +350,9 @@ public partial class IslandWindow : Window
         StartupQueueActive = true;
 
         // 事件源接线
+        // 【0.0.2 线程闸门】先把总线与 UI 线程绑定，再订阅。
+        // 顺序不能反：Marshaler 未设置时总线会退化为"发布者线程直调"（诊断器路径）。
+        _bus.Marshaler = a => Dispatcher.InvokeAsync(a);
         _bus.Subscribe(ev => OnEvent(ev));
         _clock = new Sources.ClockSource();
         _clock.Start(_bus);
@@ -396,6 +403,16 @@ public partial class IslandWindow : Window
         _dsh = new Sources.DshSource();
         _dsh.Configure(_settings);
         _dsh.Start(_bus);
+
+        // 系统状态：电源 / Wi-Fi 与网速 / 移动热点 / 飞行模式 / 麦克风（docs §5.8–§5.12）
+        _system = new Sources.SystemStatusSource();
+        _system.Configure(_settings);
+        _system.Start(_bus);
+
+        // 深浅色切换提示（docs §5.13）：外观变化本身就在 UI 线程，这里只需转投一次队列
+        _themeSwitch = new Sources.ThemeSwitchSource { Marshaler = a => Dispatcher.InvokeAsync(a) };
+        _themeSwitch.Configure(_settings);
+        _themeSwitch.Start(_bus);
 
         Native.FullscreenDetector.FullscreenChanged += OnFullscreenChanged;
         Native.FullscreenDetector.Start();
@@ -474,6 +491,18 @@ public partial class IslandWindow : Window
             Microsoft.Win32.SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
             Microsoft.Win32.SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
             Microsoft.Win32.SystemEvents.SessionSwitch -= OnSessionSwitch;
+
+            // 【数据源也必须释放】SystemStatusSource 持有 1s 轮询定时器、
+            // ThemeSwitchSource 订阅了 AppTheme.Changed 静态事件 ——
+            // 不释放的话，窗口关掉后定时器还在跑、主题变化还在往已销毁的窗口推事件
+            // （自检/测试里反复创建 IslandWindow 时会不断累积）。
+            try { _system?.Dispose(); } catch { }
+            try { _themeSwitch?.Dispose(); } catch { }
+            try { _sys?.Dispose(); } catch { }
+            try { _clock?.Dispose(); } catch { }
+            try { _dsh?.Dispose(); } catch { }
+            try { _media?.Dispose(); } catch { }
+            try { _usage?.Dispose(); } catch { }
         };
 
         Hide();                       // 默认空态：不可见
@@ -608,54 +637,76 @@ public partial class IslandWindow : Window
         _autoReadTimer.Start();
     }
 
-    // ---------- 事件入口（由 Source 通过 EventBus 投递到 UI 线程）----------
+    // ---------- 事件入口 ----------
+    /// <summary>
+    /// 事件入口 —— **整个程序唯一的线程闸门**（0.0.2 收口）。
+    ///
+    /// 【契约】本方法只允许在 UI 线程上执行，且**不再自己派发**：
+    ///   · Source 侧：<see cref="Core.EventBus.Marshaler"/> 由 OnLoaded 设为
+    ///     <c>a =&gt; Dispatcher.InvokeAsync(a)</c>，总线保证 sink 一定落在 UI 线程；
+    ///   · 宿主内部直调（PreviewSysState / 全屏退出回放）本身就在 UI 线程。
+    ///
+    /// 以前这里再包一层 Dispatcher.InvokeAsync，导致"到底谁负责 marshal"含糊不清，
+    /// 也掩盖了总线在发布者线程直调的事实 —— 只要有任意一个 Source 换到后台线程，
+    /// 渲染就会跨线程访问。现在闸门只有一处，且写进了契约。
+    /// </summary>
     public void OnEvent(IslandEvent ev)
     {
-        Dispatcher.InvokeAsync(async () =>
+        if (ev == null) return;
+
+        if (_gameHidden)
         {
-            if (_gameHidden)
-            {
-                if (ev.Policy?.QueueWhenHidden == true) PendingQueue.Instance.Enqueue(ev);
-                App.LogInfo("Island", $"隐藏期间收到的 {ev.Kind} 事件已暂存：{ev.Title}");
-                return;
-            }
+            if (ev.Policy?.QueueWhenHidden == true) PendingQueue.Instance.Enqueue(ev);
+            App.LogInfo("Island", $"隐藏期间收到的 {ev.Kind} 事件已暂存：{ev.Title}");
+            return;
+        }
 
-            // 【就地更新】同一 Id 的事件（如媒体每秒刷新）应替换内容，而不是新增一条岛
-            var existing = _stack.Items.FirstOrDefault(i => i.Event.Id == ev.Id);
-            if (existing != null)
-            {
-                UpdateItem(existing, ev);
-                return;
-            }
+        // ===== 先处理"终止"语义，再做"就地更新" =====
+        //
+        // 【0.0.2 修正 —— 这两条的判定顺序此前是反的】
+        // 两个终止事件的 Id 与在岛上那条**完全相同**：
+        //   · 媒体结束：Id = "media:<SourceId>"，与播放中那条同 Id（MediaSource.Emit）
+        //   · DSH 收起：Id = "dsh:<会话id>"，与工作中那条同 Id（DshSource.PublishRetract）
+        // 而"同 Id 就地更新"的判断原本排在它们前面 → 终止事件会被当成一次普通刷新走
+        // UpdateItem，岛根本不会被收起，只是内容被换成空胶囊并**永久留在屏幕上**。
+        // DshSource 里那句注释（"必须在'同 Id 就地更新'之前判断"）本来就是对的，
+        // 只是代码没照着写；这里把顺序与注释对齐。
+        // 主动作是收起、不是刷新，所以必须放在就地更新之前。
 
-            // 媒体"会话结束"事件：Title 为空 → 收起该岛
-            if (ev.Kind == "media" && string.IsNullOrEmpty(ev.Title))
-            {
-                var media = _stack.Items.FirstOrDefault(i => i.Event.Id == "media");
-                if (media != null && !media.IsDying) Dismiss(media);
-                return;
-            }
+        // 媒体"会话结束"事件：Title 为空 → 收起该岛
+        if (ev.Kind == "media" && string.IsNullOrEmpty(ev.Title))
+        {
+            // 多会话：按事件自带的 Id 精确收起（旧代码写死 "media"，
+            // 而实际 Id 一直是 "media:<SourceId>"，那个回退分支从来没有命中过）。
+            var media = _stack.Items.FirstOrDefault(i => i.Event.Id == ev.Id);
+            if (media != null && !media.IsDying) Dismiss(media);
+            return;
+        }
 
-            // DSH 空闲收起：与媒体同一套约定（Kind="dsh-retract"，Id 仍为 "dsh"）。
-            // 必须在"同 Id 就地更新"之前判断，否则会被当成普通刷新而永远留在岛上。
-            if (ev.Kind == "dsh-retract")
-            {
-                // 多任务：每条 DSH 会话有独立 Id（"dsh:<会话id>"），
-                // 因此按事件自带的 Id 精确收起，不能写死 "dsh"。
-                var old = _stack.Items.FirstOrDefault(i => i.Event.Id == ev.Id);
-                if (old != null && !old.IsDying) Dismiss(old);
-                return;
-            }
+        // DSH 空闲收起（多任务：每条会话一个独立 Id）
+        if (ev.Kind == "dsh-retract")
+        {
+            var old = _stack.Items.FirstOrDefault(i => i.Event.Id == ev.Id);
+            if (old != null && !old.IsDying) Dismiss(old);
+            return;
+        }
 
-            // 启动阶段：先进队列按优先级逐条入场，避免一次性全部弹出
-            if (StartupQueueActive)
-            {
-                EnqueueStartup(ev);
-                return;
-            }
+        // 【就地更新】同一 Id 的事件（如媒体每秒刷新）应替换内容，而不是新增一条岛
+        var existing = _stack.Items.FirstOrDefault(i => i.Event.Id == ev.Id);
+        if (existing != null)
+        {
+            UpdateItem(existing, ev);
+            return;
+        }
 
-            AdmitIsland(ev);
-        });
+        // 启动阶段：先进队列按优先级逐条入场，避免一次性全部弹出
+        if (StartupQueueActive)
+        {
+            EnqueueStartup(ev);
+            return;
+        }
+
+        AdmitIsland(ev);
     }
 
     private void OnUserPreferenceChanged(object sender, Microsoft.Win32.UserPreferenceChangedEventArgs e)
@@ -708,17 +759,22 @@ public partial class IslandWindow : Window
         catch (Exception ex) { App.Log("Island", ex); }
     }
 
-    /// <summary>胶囊内歌词控件引用（用于每帧更新文本 / 滚动）</summary>
-    private TextBlock? _pillLyricText;
-    private Grid? _pillLyricRow;
-    private FrameworkElement? _pillLyricHost;
-    /// <summary>媒体胶囊的根 Grid（换句时同步第 1 列宽度）</summary>
-    private Grid? _pillGrid;
-    /// <summary>媒体胶囊的文字列 StackPanel（换句时同步其 Width）</summary>
-    private FrameworkElement? _pillTextCol;
-    private string _lastLyricText = "";
-    private double _lyricScrollShift;      // 需要滚动时的位移
-    private bool _lyricNeedScroll;
+    /// <summary>
+    /// 胶囊内歌词行的滚动状态，按 event.Id 记录。
+    ///
+    /// 【为什么按 item 存】它描述的是"某条 item 的歌词行此刻滚到哪了"。
+    /// 以前是窗口级共享字段，与 <c>_pillGrid / _pillLyricText</c> 一样，
+    /// 会被其它媒体会话的刷新读走/改写（见 <see cref="MediaSignature"/> 的说明）。
+    /// 顺带解决了一个隐藏问题：切到另一条媒体岛时，新胶囊会继承旧岛的
+    /// "正在滚动"标记，于是新歌词行永远不重新挂滚动动画。
+    /// </summary>
+    private readonly Dictionary<string, LyricScrollState> _lyricScroll = new();
+
+    private sealed class LyricScrollState
+    {
+        /// <summary>本行是否已经挂过滚动动画</summary>
+        public bool NeedScroll;
+    }
 
     /// <summary>歌词源（跟随当前媒体曲目）</summary>
     private readonly Sources.LyricsSource _lyrics = new();
@@ -765,8 +821,18 @@ public partial class IslandWindow : Window
     /// 图库自检：构建一张详情卡但不进入集群（供 IconGallery 离屏渲染用）。
     /// </summary>
     public FrameworkElement ProbeCard(string kind, ThemeTokens? themeOverride = null,
-        Sources.MediaSnapshot? mediaOverride = null)
+        Sources.MediaSnapshot? mediaOverride = null, Core.IslandEvent? eventOverride = null)
     {
+        // 系统状态类岛有自己的一套样例（电源 / 网络 / 麦克风 / 外观），
+        // 由分部类构造 —— 这里传入完整事件，卡片模板只认 Payload 与 Title。
+        if (eventOverride != null)
+        {
+            var prev0 = AppTheme.Current;
+            if (themeOverride != null) AppTheme.SetCurrentForProbe(themeOverride);
+            try { return BuildCard(eventOverride)!; }
+            finally { AppTheme.SetCurrentForProbe(prev0); }
+        }
+
         object snap = kind switch
         {
             "media" when mediaOverride != null => mediaOverride,
@@ -805,11 +871,17 @@ public partial class IslandWindow : Window
     {
         _settings = s;
         _sys?.Configure(s);
+        _system?.Configure(s);
+        _themeSwitch?.Configure(s);
     }
 
     /// <summary>手动弹一条系统状态示例岛（设置页预览用）</summary>
     public void PreviewSysState(string signal)
     {
+        // 新增的系统状态类（电源 / 网络 / 麦克风 / 外观）走统一预览入口，
+        // 它们的样例数据在分部类里构造 —— 这里的 switch 保持只处理键位 / 解锁 / 摄像头。
+        if (PreviewSystemStatus(signal)) return;
+
         object snap = signal switch
         {
             "unlock" => new Sources.UnlockSnapshot(720, DateTime.Now, IntPtr.Zero),
@@ -956,6 +1028,7 @@ public partial class IslandWindow : Window
             var content = BuildContentFor(item);
             if (content != null && b.Child is ContentPresenter cp) cp.Content = content;
         }
+        _wifiPillSpeedText = null;      // 内容重建后旧引用作废，由新胶囊重新登记
         NeckPath.Fill = t.IslandTop;
         PlusBadge.BorderBrush = t.Stroke;
         PlusText.Foreground = t.TextSecondary;
@@ -1057,6 +1130,8 @@ public partial class IslandWindow : Window
         _visuals[ev.Id] = b;
 
         var item = new IslandItem(ev, b);
+        item.ContentKey = "pill";
+        ItemContentBuilt(item, content);
         item.MeasuredWidth = MeasurePillWidth(ev);
         return item;
     }
@@ -1228,7 +1303,8 @@ public partial class IslandWindow : Window
             "unlock" when ev.Payload is Sources.UnlockSnapshot snap => BuildUnlockCard(snap),
             "usage" => BuildUsageCard(ev),
             "dsh" when ev.Payload is Sources.DshSnapshot ds => BuildDshCard(ds),
-            _ => BuildNotificationCard(ev)
+            // 系统状态类（电源 / 网络 / 麦克风 / 外观）统一走分部类，返回 null 时回落通知卡
+            _ => BuildSystemCard(ev) ?? BuildNotificationCard(ev)
         };
         if (body == null) return null;
         // 【卡片专用缩放】详情卡内容按【未缩放】的 CardWidth 排版，再整体放大 Scale。
@@ -2022,6 +2098,10 @@ public partial class IslandWindow : Window
         if (ev.Kind == "unlock")
             return Native.SvgIcons.CreateSphere("unlock", 19, AppTheme.Current.Success);
 
+        // 系统状态类（电源 / 网络 / 麦克风 / 外观）：Lucide 状态图标
+        var systemSphere = BuildSystemSphere(ev);
+        if (systemSphere != null) return systemSphere;
+
         // DSH 工作状态：球体内用 sparkles / check，不依赖应用图标
         if (ev.Kind == "dsh" && ev.Payload is Sources.DshSnapshot ds)
             return Native.SvgIcons.CreateSphere(ds.Working ? "sparkles" : "check", 19,
@@ -2386,8 +2466,28 @@ public partial class IslandWindow : Window
             _ => BuildContent(item.Event)
         };
         if (el != null) item.ContentKey = key;
+        // 子树换了 → 同步（或作废）它的引用与波形柱子。
+        // 必须放在 ContentKey 同步之后：ItemContentBuilt 要靠它判断装的是不是胶囊。
+        ItemContentBuilt(item, el);
         return el;
     }
+
+    // ---------- 仅用于自检（不参与运行时逻辑）----------
+    /// <summary>喂一条真事件并走一帧真实渲染，供 MediaIsolationDiag 端到端验证波形</summary>
+    internal void FeedForProbe(Core.IslandEvent ev)
+    {
+        StartupQueueActive = false;      // 不排队，直接入场
+        OnEvent(ev);
+        EnsureVisible();                 // 窗口隐藏时事件会被丢弃，这里强制显示
+        Render();                        // 真实渲染帧（弹簧 + 波形刷新都在里面）
+    }
+
+    internal IReadOnlyList<IslandItem> ProbeItems => _stack.Items;
+    internal IslandItem? ProbeActive => _stack.Active;
+    internal List<Border>? ProbeWaveBars(string id)
+        => _mediaSig.TryGetValue(id, out var mi) ? mi.Bars : null;
+    internal Grid? ProbeLyricRow(string id)
+        => _mediaSig.TryGetValue(id, out var mi) ? mi.LyricRow : null;
 
     /// <summary>仅供 DshRenderDiag 渲染自检使用（不参与运行时逻辑）</summary>
     internal static FrameworkElement BuildDshPillPublic(Sources.DshSnapshot? s) => BuildDshPill(s);
@@ -2424,7 +2524,8 @@ public partial class IslandWindow : Window
         "unlock" => BuildUnlockPill(ev),
         "dsh" when ev.Payload is Sources.DshSnapshot ds => BuildDshPill(ds),
         "dsh-retract" => BuildDshPill(null),
-        _ => BuildNotificationPill(ev)
+        // 系统状态类（电源 / 网络 / 麦克风 / 外观）统一走分部类，返回 null 时回落通知胶囊
+        _ => BuildSystemPill(ev) ?? BuildNotificationPill(ev)
     };
 
     /// <summary>
@@ -2974,6 +3075,168 @@ public partial class IslandWindow : Window
         return h > 0 ? $"{h}h {m:00}m" : $"{m}m";
     }
 
+    // ---------- 波形 ----------
+
+    /// <summary>波形一根柱子在一个周期内的往返时长（毫秒）。四根依次错开 1/4 周期。</summary>
+    private const double WavePeriodMs = 1800.0;
+    /// <summary>柱子最低/最高高度（DIP）</summary>
+    private const double WaveBarMin = 4.0;
+    private const double WaveBarMax = 13.0;
+
+    /// <summary>
+    /// 波形的相位时钟（秒）。**全进程只有一个，与任何子树的生命周期无关。**
+    ///
+    /// 【为什么必须是静态的】柱高 = f(相位)，相位必须只由"现在几点"决定。
+    /// 只要它跟某棵树、某个动画或者某次重建绑定，重建就会把整块波形拉回起点
+    /// （旧实现就是如此：动画 BeginTime 从重建那刻重新起算）。
+    /// 用 <see cref="Stopwatch"/> 取单调时钟，不受系统时间调整影响。
+    /// </summary>
+    private static readonly System.Diagnostics.Stopwatch WaveClock = System.Diagnostics.Stopwatch.StartNew();
+
+    /// <summary>
+    /// 第 <paramref name="i"/> 根柱子在当前相位下的高度。
+    ///
+    /// 【纯函数】同一时刻调用任意次、在任意一根柱子上调用，结果都相同 ——
+    /// 这正是"重建不再闪"的根据：新建的四根柱子第一次渲染就落在正确高度上。
+    /// 相位取 <see cref="WavePeriodMs"/> 的模，因此时间再长也不会丢精度。
+    /// </summary>
+    private static double WaveBarHeight(int i, bool playing)
+    {
+        if (!playing) return WaveBarMin;
+        double phase = (WaveClock.Elapsed.TotalMilliseconds + i * WavePeriodMs / 4.0) % WavePeriodMs;
+        double tri = phase < WavePeriodMs / 2
+            ? phase / (WavePeriodMs / 2)               // 0 → 1
+            : (WavePeriodMs - phase) / (WavePeriodMs / 2);   // 1 → 0
+        return WaveBarMin + tri * (WaveBarMax - WaveBarMin);
+    }
+
+    /// <summary>
+    /// 每帧刷新波形柱高（由 <see cref="Render"/> 调用）。
+    ///
+    /// 只有"当前胶囊里装着的、正在播放的媒体"才刷新：侧列球体、展开卡、
+    /// 以及已经不在视觉树上的旧子树一律跳过 —— 后者的引用已由
+    /// <see cref="ItemContentRemoved"/> 摘除。
+    /// </summary>
+    private void UpdateWaveBars()
+    {
+        // 【为什么按 event.Id 查表，而不是把引用挂在 IslandItem 上】
+        // UpdateItem 是"就地替换事件"，IslandItem 实例在一条岛的整个生命周期里
+        // 都是同一个；而条目的 Id 也就是 event.Id，同样稳定。
+        // 两者的区别只在岛被收起时：条目随 Class 移除，表项也一并删掉（见
+        // CollapseAndRemove）—— 用表能顺手把不再需要的引用清干净，不留悬挂引用。
+        var active = _stack.Active;
+        if (active == null || active.ContentKey != "pill") return;
+
+        var mi = _mediaSig.GetValueOrDefault(active.Event.Id);
+        if (mi?.Bars is not { Count: 4 } bars) return;
+
+        // 播放态从"最新快照"取，而不是用建树时的旧快照：
+        // 这样点暂停后波形立刻静止，不必等下一次整树重建。
+        bool playing = (active.Event.Payload as Sources.MediaSnapshot)?.IsPlaying ?? false;
+        for (int i = 0; i < 4; i++)
+        {
+            double h = WaveBarHeight(i, playing);
+            if (Math.Abs(bars[i].Height - h) < 0.05) continue;
+            bars[i].Height = h;
+        }
+    }
+
+    /// <summary>
+    /// 媒体胶囊 id（= 这条岛的事件 Id）。与 <c>MediaSource.Emit</c> 的
+    /// <c>"media:" + SourceId</c> 同口径，是"这条胶囊的子树"的索引键。
+    /// </summary>
+    private static string MediaEventId(Sources.MediaSnapshot snap) => "media:" + snap.SourceId;
+
+    /// <summary>
+    /// 一条媒体胶囊"当前装着的子树"的引用。按 event.Id 存放 ——
+    /// A 会话的刷新因此永远不会摸到 B 会话的列宽。
+    ///
+    /// 【曾经的写法与症状】这些引用原本是窗口级的共享字段
+    /// （<c>_pillGrid / _pillTextCol / _pillLyricText / _pillLyricRow</c>），
+    /// 指向"最后一次 BuildMediaPill 建出来的那棵树"。而 <c>ApplyMediaPillColumns</c>
+    /// 会被**任意一条**媒体事件调用（UpdateItem 对每条 media item 都执行
+    /// MeasurePillWidth → MediaPillWidth），于是两条媒体会话并存时，
+    /// 后刷新那条的列宽被写进了**正在显示的另一条**胶囊里。
+    /// </summary>
+    private sealed class MediaSignature
+    {
+        public Grid? Grid;
+        public FrameworkElement? TextCol;
+        public TextBlock? LyricText;
+        public Grid? LyricRow;
+        /// <summary>当前这一句歌词（空串 = 无歌词行）</summary>
+        public string LastLyricText = "";
+        /// <summary>波形宿主与四根柱子</summary>
+        public StackPanel? Wave;
+        public List<Border>? Bars;
+    }
+
+    private readonly Dictionary<string, MediaSignature> _mediaSig = new();
+
+    /// <summary>取（必要时创建）某条媒体胶囊的子树引用表</summary>
+    private MediaSignature MediaSigFor(string id)
+    {
+        if (!_mediaSig.TryGetValue(id, out var mi))
+        {
+            mi = new MediaSignature();
+            _mediaSig[id] = mi;
+        }
+        return mi;
+    }
+
+    /// <summary>
+    /// 内容被构建出来时登记它携带的"子树引用"。非媒体内容会清掉旧引用 ——
+    /// 换装成球体 / 详情卡后，旧的胶囊子树已经不在视觉树上，引用必须一并作废。
+    /// </summary>
+    private void ItemContentBuilt(IslandItem item, FrameworkElement? content)
+    {
+        if (item.Event.Kind == "media" && item.ContentKey == "pill"
+            && content is Grid g && item.Event.Payload is Sources.MediaSnapshot snap)
+        {
+            var mi = MediaSigFor(MediaEventId(snap));
+            mi.Grid = g;      // BuildMediaPill 内部已把 TextCol/歌词/柱子登记到同一张表上
+        }
+        else if (item.Event.Kind == "media")
+        {
+            ItemContentRemoved(item);
+        }
+        SyncSystemContentRefs(item, content);
+    }
+
+    /// <summary>
+    /// 这条 item 的媒体子树已脱离视觉树（换装 / 收起 / 移除）。
+    /// 只清引用，不删表项：<c>MediaSig</c> 与"上次签名"必须留着，
+    /// 否则重新装回胶囊时会被当成新内容而触发一次多余重建。
+    /// </summary>
+    private void ItemContentRemoved(IslandItem item)
+    {
+        if (item.Event.Kind != "media") return;
+        if (!_mediaSig.TryGetValue(item.Event.Id, out var mi)) return;
+        mi.Grid = null;
+        mi.TextCol = null;
+        mi.LyricText = null;
+        mi.LyricRow = null;
+        mi.Wave = null;
+        mi.Bars = null;
+        mi.LastLyricText = "";
+    }
+
+    /// <summary>
+    /// 把文字列宽同步到**指定那条**媒体胶囊的第 1 列与其 textCol。
+    /// 唯一调用者是 <see cref="MediaPillWidth"/>，保证两件事同时成立：
+    ///   · "容器宽 = 三列之和"这一不变量（对每条岛各自成立）；
+    ///   · 宽度只落在自己的子树上 —— 两条媒体岛并存时互不影响。
+    /// <paramref name="id"/> 对应的子树尚未建好时（例如它此刻是球体）静默跳过：
+    /// 等它装回胶囊时 BuildMediaPill 会按当时的宽度重新建列，不会留下错宽度。
+    /// </summary>
+    private void ApplyMediaPillColumns(string id, double textW)
+    {
+        if (!_mediaSig.TryGetValue(id, out var mi)) return;
+        if (mi.Grid != null && mi.Grid.ColumnDefinitions.Count >= 2)
+            mi.Grid.ColumnDefinitions[1].Width = new GridLength(textW);
+        if (mi.TextCol != null) mi.TextCol.Width = textW;
+    }
+
     /// <summary>媒体胶囊：封面 + 歌名 + 艺术家 + 波形</summary>
     private FrameworkElement BuildMediaPill(Sources.MediaSnapshot snap)
     {
@@ -3110,22 +3373,27 @@ public partial class IslandWindow : Window
         lyricRow.ClipToBounds = true;
         textCol.Children.Add(lyricRow);
 
-        _pillLyricText = lyricText;
-        _pillLyricRow = lyricRow;
-        _pillLyricHost = textCol;
-        _lastLyricText = "";        // 新元素是空的：强制下一帧重新赋值，避免歌词空白
-        _lyricNeedScroll = false;
-
         Grid.SetColumn(textCol, 1);
         grid.Children.Add(textCol);
-        _pillGrid = grid;
-        _pillTextCol = textCol;
-        // 引用就位后按同一公式再同步一次（构建早期 _pillGrid 还是旧的/空的）
-        ApplyMediaPillColumns(Math.Max(60, totalW - PillCoverColW - PillWaveColW - PillTailPad));
 
-        // 波形：Playing 时动画，Paused 时静止
-        // 波形：明确固定宽度，右 Margin 与岛内边距(12)对齐，
-        // 并设 HorizontalAlignment=Right —— 保证永远贴在标题行右端、不出界。
+        // 【关键】引用与列宽全部按 item 记账，且"先记账、后同步列宽"。
+        // ApplyMediaPillColumns 要靠 event.Id 反查"这条 item 的"子树，所以引用
+        // 必须在调用之前就位 —— 旧代码里"构建早期 _pillGrid 还是旧的/空的，
+        // 引用就位后再同步一次"的那次兜底调用，正是把**别的** item 的列宽
+        // 写进来的入口（两条媒体岛并存时，标题截断与波形位置就会来回跳）。
+        var id = MediaEventId(snap);
+        var mi = MediaSigFor(id);
+        mi.Grid = grid;
+        mi.TextCol = textCol;
+        mi.LyricText = lyricText;
+        mi.LyricRow = lyricRow;
+        mi.LastLyricText = "";       // 新元素是空的：强制下一帧重新赋值，避免歌词空白
+        ApplyMediaPillColumns(id, Math.Max(60, totalW - PillCoverColW - PillWaveColW - PillTailPad));
+
+        // ---------- 波形 ----------
+        // 位置：胶囊右侧、整体垂直居中。用 Grid 叠一层（独立于文字列），
+        // 按整个胶囊高度居中，不受标题行高度影响（以前放在 metaRow 里，行矮就显得贴顶）。
+        // 宽度明确固定，右 Margin 与岛内边距(12)对齐，并贴右 —— 永远不越界。
         var wave = new StackPanel
         {
             Orientation = Orientation.Horizontal,
@@ -3134,35 +3402,46 @@ public partial class IslandWindow : Window
             Margin = new Thickness(6, 0, PillTailPad, 0),
             Width = 22,                                  // 4×2.5 + 3×2(间距) ≈ 16，留余量
             HorizontalAlignment = HorizontalAlignment.Right,
-            VerticalAlignment = VerticalAlignment.Center,
-            ClipToBounds = true                         // 动画放大时不溢出
+            VerticalAlignment = VerticalAlignment.Center
         };
+
+        // 【0.0.2 修正 · 波形"闪"的真正来源】
+        //
+        // 旧做法给每根柱子挂一个 DoubleAnimation，BeginTime 错开 0/150/300/450ms。
+        // 这种动画一旦子树被重建就会**从零重新起拍**：重建瞬间四根柱子一起归位，
+        // 再依次长起来 —— 看起来就是波形整块塌一下（图一 ↔ 图二）。
+        // 而重建在播放期间是周期性发生的（媒体每秒推送 + 任何需要重建的变更）。
+        // 当时用"按播放位置注入初始高度"来补偿，但那个相位和动画自己的时间轴
+        // （从重建时刻起算）根本不是同一个东西，等于补偿完又被动画覆盖。
+        //
+        // 现在改为【一个动画都不挂】：柱高由 Render() 每帧按"频谱相位"直写。于是
+        //   · 重建后不需要任何相位补偿 —— 根本没有需要补偿的时间轴；
+        //   · 相位只有一个来源（见 WaveBarHeight 的静态时钟），同一时刻永远
+        //     算出同一组高度，与"这条子树是什么时候建的"完全无关；
+        //   · 暂停时直接写 4，波形自然静止，不需要额外分支。
+        // 顺带解决旧做法的另一个隐患：窗口隐藏时 WPF 会停掉时钟，恢复显示后
+        // 动画时间轴已经跑偏，四根柱子的相对相位会对不上。
+        var bars = new List<Border>(4);
         for (int i = 0; i < 4; i++)
         {
-            var bar = new Border
+            bars.Add(new Border
             {
                 Width = 2.5, CornerRadius = new CornerRadius(1.25),
                 Background = AppTheme.Current.Accent,
-                Height = snap.IsPlaying ? 10 : 4,
+                Height = WaveBarHeight(i, snap.IsPlaying),
                 Margin = new Thickness(0.8, 0, 0.8, 0),
                 VerticalAlignment = VerticalAlignment.Center
-            };
-            if (snap.IsPlaying)
-            {
-                var anim = new System.Windows.Media.Animation.DoubleAnimation(
-                    4, 13, TimeSpan.FromMilliseconds(900))
-                { BeginTime = TimeSpan.FromMilliseconds(i * 150), AutoReverse = true, RepeatBehavior = System.Windows.Media.Animation.RepeatBehavior.Forever };
-                bar.BeginAnimation(FrameworkElement.HeightProperty, anim);
-            }
-            wave.Children.Add(bar);
+            });
         }
-        // 【波形位置】放在胶囊【右侧、整体垂直居中】。
-        // 用 Grid 叠一层：波形独立于文字列，按整个胶囊高度居中，
-        // 不受标题行高度影响（之前放在 metaRow 里，行矮就显得贴顶）。
+        foreach (var bar in bars) wave.Children.Add(bar);
         Grid.SetColumn(wave, 2);            // 岛的第 3 列（右端）
-        wave.VerticalAlignment = VerticalAlignment.Center;
-        wave.HorizontalAlignment = HorizontalAlignment.Right;
         grid.Children.Add(wave);
+
+        // 【无条件登记】重建后换上新的一组柱子，首建时也必须有引用 ——
+        // 否则 UpdateWaveBars 拿不到 bars 直接返回，波形会**冻住不再动**。
+        // （这里曾经错写成 `if (mi.Wave != null)`，而首建时它恰好是 null。）
+        mi.Wave = wave;
+        mi.Bars = bars;
         return grid;
     }
 
@@ -3259,6 +3538,11 @@ public partial class IslandWindow : Window
     /// </summary>
     private double MeasurePillWidth(IslandEvent ev)
     {
+        // 系统状态类（电源 / 网络 / 麦克风 / 外观）的宽度在分部类里算，
+        // 口径与该文件里的 StatusPill 排版严格一一对应。
+        var systemW = MeasureSystemPillWidth(ev);
+        if (systemW is double sw) return Math.Clamp(sw, IslandMetrics.MinWidth, IslandMetrics.MaxWidth);
+
         // 各胶囊的右内边距（与 Build*Pill 中最后一个元素的右 Margin 一致）：
         //   0 → 内容紧贴右边缘，几乎不留白（历史上的做法，观感尚可但显拥挤）
         //   1 → 补一个右内边距，让左右对称（内边距不足的胶囊宽度同样要补）
@@ -3508,8 +3792,9 @@ public partial class IslandWindow : Window
         // 一旦歌里有长句，胶囊就被永久撑到那个宽度 —— 当前句很短时
         // 右侧留一大片空白（实测《Underwater》标题短、歌词短，胶囊却很长）。
         //
-        // 现在跟随当前播放位置的那句歌词。为防止"长句→短句"每句抖动，
-        // 加了滞回：明显变短（超过 WidthShrinkHysteresis）才收窄。
+        // 现在跟随当前播放位置的那句歌词，但**按档位量化**（见下方 quantized）：
+        // 宽度只在"短句档 / 长句档"之间切换，一首歌最多变两次，
+        // 不会再出现每句都改容器宽、把波形在内的整条胶囊反复拽动的现象。
         int posMs = (int)CurrentPositionMs(snap);
         int idxNow = _lyrics.FindLineIndex(posMs, _lyricOffsetMs);
         string curText = idxNow >= 0 && idxNow < res.Lines.Count ? res.Lines[idxNow].Text : "";
@@ -3522,9 +3807,32 @@ public partial class IslandWindow : Window
 
         double need = MeasureText(curText, 11);
 
-        // 缓存键包含"当前这句"，换句即失效 —— 这是宽度能跟随的关键
+        // 【0.0.2 修正 · 波形闪烁的根因】
+        // 宽度必须按"档位"取整，不能按每句歌词的实测宽度逐句变化。
+        //
+        // 症状：波形位置反复横跳（用户看到的就是"一闪一闪"）。
+        // 链路：媒体快照每 ~900ms 刷新 → 每帧 Render 都调本函数 →
+        //   宽度逐句变化 → MediaPillWidth 把 columns[1] 改掉 →
+        //   容器宽变化 → 整条胶囊的弹簧在动画中被反复改目标 →
+        //   内部的"文字列 + 波形"在旧坐标与新坐标之间来回跳。
+        //
+        // 只做"单句宽度"的量化还不够：每句都会落进相邻两档，宽度照样变。
+        // 所以取【全曲 p80】作为档位锚点，再按当前句相对它的大小取整：
+        //   · 同一首歌内最多 3 个宽度值（基础档 / 长句档 / 上限档）；
+        //   · 仍能跟随歌曲（歌短则岛短，长句歌才变宽），不会永久撑在上限；
+        //   · 换档是低频事件（一首歌 ≤ 3 次），动画期间护栏可以放心把它挡掉。
+        double baseW = BaseLyricWidth(res);
+        if (baseW <= 0) baseW = need;
+        // 只有三档，且每档都是定值 —— 绝不能把 need 本身当结果返回，
+        // 否则长句之间又会逐句变化，等于没量化。
+        //   ① need ≤ 0.92×base → base（短句：不缩，避免忽胖忽瘦）
+        //   ② 0.92 ~ 1.08×base → base（同一档）
+        //   ③ need > 1.08×base  → 1.45×base（长句：固定加宽档）
+        double quantized = need > baseW * 1.08 ? baseW * 1.45 : baseW;
+
+        // 缓存键含"这一档"，同档内不失效
         string key = snap.SourceId + "|" + res.Title + "|" + res.Artist + "|" + res.Source
-                   + "|" + idxNow + "|" + curText.Length;
+                   + "|" + (int)Math.Round(quantized);
         // 【纯函数：同一输入必得同一输出】
         // 之前这里带副作用（写 _lyricWidthCache 并有滞回），而 
         // BuildMediaPill（构建内容）与 MediaPillWidth（算容器宽）会在不同时刻
@@ -3534,8 +3842,8 @@ public partial class IslandWindow : Window
         if (key == _lyricWidthKey) return _lyricWidthCache;
 
         _lyricWidthKey = key;
-        _lyricWidthCache = need;
-        return need;
+        _lyricWidthCache = quantized;
+        return quantized;
     }
 
     /// <summary>
@@ -3567,6 +3875,31 @@ public partial class IslandWindow : Window
     /// </summary>
     private void TryResizePillForLyric(Sources.MediaSnapshot? snap)
     {
+        // 【0.0.2 新增护栏：弹簧未落定时不改目标宽度】
+        // 这是"波形一闪一闪"的另一半原因（见 TrackLyricWidth 的注释）：
+        // 换行恰好落在胶囊宽度弹簧还在收敛的过程中时，item.Width.To(newW) 会
+        // 把正在跑的动画直接改向，内部的「文字列 + 波形」跟着在两组列宽之间跳。
+        // 与其压制症状，不如让换档等弹簧站稳：宽度不是每句都必须立刻变的东西，
+        // 晚 200ms 换档完全看不出来，但在动画中途换档非常显眼。
+        if (!IsPillWidthSettled())
+        {
+            if (_lyricResizePending is null)
+            {
+                _lyricResizePending = new DispatcherTimer(DispatcherPriority.Background)
+                { Interval = TimeSpan.FromMilliseconds(120) };
+                _lyricResizePending.Tick += (_, _) =>
+                {
+                    _lyricResizePending!.Stop();
+                    _lyricResizePending = null;
+                    TryResizePillForLyric(_stack.Active?.Event.Payload as Sources.MediaSnapshot);
+                };
+            }
+            _lyricResizePending.Start();
+            return;
+        }
+        _lyricResizePending?.Stop();
+        _lyricResizePending = null;
+
         if (snap == null) return;
         var item = _stack.Active;
         if (item == null || item.Event.Kind != "media") return;
@@ -3576,15 +3909,30 @@ public partial class IslandWindow : Window
         // MeasurePillWidth 内部已经同步好三列宽度（见 MediaPillWidth），
         // 这里只负责判断"总宽是否真的变了"并请求一次重排。
         double w = MeasurePillWidth(item.Event);
-        if (Math.Abs(w - item.MeasuredWidth) < 1.0) return;
+
+        // 【死区放大到 4px】原阈值 1px 意味着"几乎任何歌词换行都算变化"。
+        // 宽度做量化之后（见 TrackLyricWidth），同档内 w 恒定，这里不会被频繁触发；
+        // 死区再放到 4px，是为了吸收浮点误差与档位边界的抖动。
+        if (Math.Abs(w - item.MeasuredWidth) < 4.0) return;
 
         item.MeasuredWidth = w;
         _lastLayoutSignature = null;
 
-        // 下一帧布局：此时新歌词已写入，宽度是按这一句算的
+        // 下一帧布局：此时新歌词已写入，宽度是按这一档算的
         Dispatcher.BeginInvoke(new Action(() => ApplyLayout(force: true)),
             System.Windows.Threading.DispatcherPriority.Render);
     }
+
+    /// <summary>
+    /// 胶囊宽度弹簧是否已经落定（可安全接受新的目标宽度）。
+    /// 直接用引擎自己的收敛判据 <see cref="Core.Spring.IsSettled"/>，
+    /// 不再另立一套阈值 —— 两套阈值不一致时，"引擎认为还在动、我们却改了目标"
+    /// 这种错配会重新引入抖动。
+    /// </summary>
+    private bool IsPillWidthSettled() => _stack.Active?.Width.IsSettled ?? true;
+
+    /// <summary>等宽度弹簧落定后再换档的延时器（见 TryResizePillForLyric）</summary>
+    private DispatcherTimer? _lyricResizePending;
 
     /// <summary>媒体胶囊三列的固定宽度（未缩放口径）</summary>
     private const double PillCoverColW = 12 + 24 + 8;   // 左内边距 + 封面 + 间距
@@ -3662,19 +4010,8 @@ public partial class IslandWindow : Window
         // 把波形盖住（用户看到的就是"挤波形"）。
         // 现在文字列 = 总宽 - 三列固定宽，三列之和恒等于容器宽，永不溢出。
         double finalTextW = Math.Max(60, total - PillCoverColW - PillWaveColW - PillTailPad);
-        ApplyMediaPillColumns(finalTextW);
+        ApplyMediaPillColumns(MediaEventId(snap), finalTextW);
         return total;
-    }
-
-    /// <summary>
-    /// 把文字列宽同步到当前媒体胶囊的第 1 列与 textCol。
-    /// 只有一处调用（<see cref="MediaPillWidth"/>），保证"容器宽 = 三列之和"这一不变量。
-    /// </summary>
-    private void ApplyMediaPillColumns(double textW)
-    {
-        if (_pillGrid != null && _pillGrid.ColumnDefinitions.Count >= 2)
-            _pillGrid.ColumnDefinitions[1].Width = new GridLength(textW);
-        if (_pillTextCol != null) _pillTextCol.Width = textW;
     }
 
     /// <summary>
@@ -3685,14 +4022,25 @@ public partial class IslandWindow : Window
     /// </summary>
     private void UpdatePillLyric(Sources.MediaSnapshot? snap)
     {
-        var tb = _pillLyricText;
-        var row = _pillLyricRow;
-        if (tb == null || row == null) return;
+        if (snap == null) return;
+        var item = _stack.Active;
+        if (item == null || item.Event.Id != MediaEventId(snap)) return;
+
+        // 【必须从"这条 item 自己的"引用表取控件】
+        // 以前取的是窗口级的 _pillLyricText / _pillLyricRow，那指向"最后一次
+        // BuildMediaPill 建出来的"那棵树 —— 两条媒体岛并存时（浏览器 + 音乐软件），
+        // 刷新当前胶囊会写到另一条会话的歌词行上（或写到一棵已脱离视觉树的旧子树上）。
+        // 按 item 取之后，A 的刷新永远只摸 A 自己的子树。
+        var mi = _mediaSig.GetValueOrDefault(item.Event.Id);
+        var tb = mi?.LyricText;
+        var row = mi?.LyricRow;
+        if (tb == null || row == null || mi == null) return;
+        var scroll = LyricScrollFor(item.Event.Id);
 
         string? text = null;
         int posMs = 0;
         // 歌词只对音乐播放器生效：浏览器/视频播放器不显示歌词
-        if (snap != null && _settings.Media.ShowLyrics && Sources.MediaSourcePolicy.IsMusicPlayer(snap.SourceId))
+        if (_settings.Media.ShowLyrics && Sources.MediaSourcePolicy.IsMusicPlayer(snap.SourceId))
         {
             posMs = (int)(snap.PositionTicks / TimeSpan.TicksPerMillisecond);
             text = _lyrics.CurrentText(posMs, _lyricOffsetMs);
@@ -3701,10 +4049,15 @@ public partial class IslandWindow : Window
         // 无歌词 / 未同步 / 纯音乐：隐藏第二行，胶囊回单行
         if (string.IsNullOrWhiteSpace(text))
         {
-            if (_lastLyricText != "")
+            // 【不再用 `LastLyricText != ""` 当"是否已经折叠"的判据】
+            // 新树建出来时 LastLyricText 就是 ""，于是这条分支一次都不会执行 ——
+            // 浏览器（永远没有歌词）的歌词行就一直留着，白占 15px+1 行高，
+            // 把标题从"单行居中"顶高约 8px。改为按 Visibility 判断，与状态一致。
+            if (row.Visibility != Visibility.Collapsed || scroll.NeedScroll)
             {
-                _lastLyricText = "";
+                mi.LastLyricText = "";
                 StopLyricScroll(tb);
+                scroll.NeedScroll = false;
                 row.Visibility = Visibility.Collapsed;
             }
             return;
@@ -3712,12 +4065,13 @@ public partial class IslandWindow : Window
         row.Visibility = Visibility.Visible;
 
         // ---- 行切换：只在换行时重建文本与动画（不要每帧重建，否则动画永远停在起点）----
-        bool lineChanged = text != _lastLyricText;
+        bool lineChanged = text != mi.LastLyricText;
         if (lineChanged)
         {
-            _lastLyricText = text!;
+            mi.LastLyricText = text!;
             tb.Text = text;
             StopLyricScroll(tb);
+            scroll.NeedScroll = false;
 
             // 【换句 → 重算胶囊宽度】
             // 宽度改为跟随"当前这句"（见 TrackLyricWidth），因此换句后必须让
@@ -3743,21 +4097,20 @@ public partial class IslandWindow : Window
         bool fits = need <= avail - 1;
         if (fits)
         {
-            if (_lyricNeedScroll) { StopLyricScroll(tb); _lyricNeedScroll = false; }
+            if (scroll.NeedScroll) { StopLyricScroll(tb); scroll.NeedScroll = false; }
             return;
         }
 
         // ---- ③ 到上限仍放不下：自动滚动 ----
         if (!_settings.Media.LyricAutoScroll)
         {
-            if (_lyricNeedScroll) { StopLyricScroll(tb); _lyricNeedScroll = false; }
+            if (scroll.NeedScroll) { StopLyricScroll(tb); scroll.NeedScroll = false; }
             return;
         }
-        if (!lineChanged && _lyricNeedScroll) return;   // 动画已在本行运行，别重启
+        if (!lineChanged && scroll.NeedScroll) return;   // 动画已在本行运行，别重启
 
-        _lyricNeedScroll = true;
+        scroll.NeedScroll = true;
         double shift = need - avail + 8;
-        _lyricScrollShift = shift;
 
         // 在本行剩余停留时间内单向滚完一轮（停留-滚动-停留），不来回、不固定周期。
         // 行时长来自 LRC 的下一行 StartMs（EndMs 常为 null）。
@@ -3786,6 +4139,17 @@ public partial class IslandWindow : Window
         anim.KeyFrames.Add(new System.Windows.Media.Animation.LinearDoubleKeyFrame(
             -shift, System.Windows.Media.Animation.KeyTime.FromPercent(1.0)));
         tx.BeginAnimation(TranslateTransform.XProperty, anim);
+    }
+
+    /// <summary>取（必要时创建）某条媒体岛的歌词滚动状态</summary>
+    private LyricScrollState LyricScrollFor(string id)
+    {
+        if (!_lyricScroll.TryGetValue(id, out var st))
+        {
+            st = new LyricScrollState();
+            _lyricScroll[id] = st;
+        }
+        return st;
     }
 
     /// <summary>停止并复位歌词滚动（换行 / 恢复单行时调用）</summary>
@@ -3819,13 +4183,17 @@ public partial class IslandWindow : Window
         if (_stack.TotalCount == 0)
         {
             // 空态：窗口保持隐藏（不占屏幕），但保留 ticker 以便事件到达时立即显示
+            _system?.SetIslandVisible(false);
             if (IsVisible && !_gameHidden) Hide();
             return;
         }
+        _system?.SetIslandVisible(true);
         ApplyLayout();
         RefreshMediaCard();          // 进度条 / 时间 / 播放图标 每帧更新
+        RefreshWifiLive();           // Wi-Fi 胶囊 / 卡片的实时速率（常驻播报）
         UpdatePillLyric(_stack.Active?.Event.Payload as Sources.MediaSnapshot);
         RefreshCardLyric(_stack.Active?.Event.Payload as Sources.MediaSnapshot);
+        UpdateWaveBars();            // 媒体波形（纯函数直写高度，重建不会打乱相位）
         ApplyCardTitleScroll();      // 标题超宽时横向滚动（列宽 = 整卡一半）
 
         // 【自适应中心】cx 必须与 IsPointerOverAnyIsland 的命中坐标系严格一致：
@@ -3912,8 +4280,11 @@ public partial class IslandWindow : Window
                     double m = MeasureCardContent(c, cwForCard());
                     if (m > 0) item.MeasuredCardHeight = m;
                 }
+                // 卡片重建 → 旧的 Wi-Fi 卡片引用作废（新卡会在构建时重新登记）
+                _wifiCardParts = null;
 
                 if (c != null && b.Child is ContentPresenter cp) cp.Content = c;
+                ItemContentBuilt(item, c);
                 if (!wantCard) _cardParts = null;
                 _lastLayoutSignature = null;   // 强制下一帧重算槽位
             }
@@ -4631,6 +5002,9 @@ public partial class IslandWindow : Window
         {
             Stage.Children.Remove(item.Visual);
             _visuals.Remove(item.Event.Id);
+            ItemContentRemoved(item);
+            _mediaSig.Remove(item.Event.Id);
+            _lyricScroll.Remove(item.Event.Id);
             _stack.Remove(item);
             _lastLayoutSignature = null;
             ApplyLayout(force: true);

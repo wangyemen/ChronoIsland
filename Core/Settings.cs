@@ -10,6 +10,21 @@ namespace ChronoIsland.Core;
 /// </summary>
 public sealed class Settings
 {
+    /// <summary>
+    /// 当前配置结构版本。**改配置结构时 +1，并在 <see cref="Migrate"/> 里补一段迁移。**
+    /// v1 = 0.0.1 及以前（文件里没有 schemaVersion 字段）
+    /// v2 = 0.0.2：首次写入 schemaVersion，为后续插件配置做铺垫
+    /// </summary>
+    public const int CurrentSchemaVersion = 2;
+
+    /// <summary>
+    /// 配置结构版本号（0.0.2 引入）。
+    /// 【为什么要有它】0.0.1 的 settings.json 没有任何版本标识，
+    /// 将来重命名 / 删除设置项时无法判断"这是老文件还是用户手改坏了"，
+    /// 只能静默丢字段。有版本号才能写确定性的迁移。
+    /// </summary>
+    public int SchemaVersion { get; set; } = CurrentSchemaVersion;
+
     public IslandSettings Island { get; set; } = new();
     public ThemeSettings Theme { get; set; } = new();
     public ClockSettings Clock { get; set; } = new();
@@ -19,6 +34,14 @@ public sealed class Settings
     public GameSettings Game { get; set; } = new();
     public SysSettings Sys { get; set; } = new();
     public DshSettings Dsh { get; set; } = new();
+    /// <summary>电源 / 电池（docs §5.8）</summary>
+    public PowerSettings Power { get; set; } = new();
+    /// <summary>网络：Wi-Fi / 移动热点 / 飞行模式（docs §5.9–§5.11）</summary>
+    public NetworkSettings Network { get; set; } = new();
+    /// <summary>麦克风占用（docs §5.12）</summary>
+    public MicSettings Mic { get; set; } = new();
+    /// <summary>深浅色切换提示（docs §5.13）</summary>
+    public ThemeSwitchSettings ThemeSwitch { get; set; } = new();
     public GeneralSettings General { get; set; } = new();
 
     [JsonIgnore]
@@ -33,11 +56,58 @@ public sealed class Settings
             if (File.Exists(FilePath))
             {
                 var json = File.ReadAllText(FilePath);
-                return JsonSerializer.Deserialize<Settings>(json) ?? new Settings();
+                var s = JsonSerializer.Deserialize<Settings>(json) ?? new Settings();
+                // 文件里没有 schemaVersion → 是 0.0.1 时代写出的，按 v1 处理。
+                // 不能只看反序列化结果：属性带默认值，缺字段时读不出"缺过"。
+                s.Migrate(FromDisk(json));
+                return s;
             }
         }
         catch (Exception ex) { App.Log("Settings", ex); }
         return new Settings();
+    }
+
+    /// <summary>读出文件里记录的 schema 版本；缺字段 / 非法值一律按最早的 v1 处理。</summary>
+    private static int FromDisk(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind == JsonValueKind.Object &&
+                doc.RootElement.TryGetProperty("schemaVersion", out var v) &&
+                v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var n) && n > 0)
+                return n;
+        }
+        catch { /* 解析失败按 v1 */ }
+        return 1;
+    }
+
+    /// <summary>
+    /// 逐级迁移到当前版本。幂等，每次加载都会调用。
+    ///
+    /// 【约定】新增迁移时只允许"补齐 / 重命名 / 换算"，不允许丢弃用户数据；
+    /// 文件版本比当前**新**时（用户回退了版本）不降级，只记日志并保留原值。
+    /// </summary>
+    private void Migrate(int from)
+    {
+        if (from < 1) from = 1;
+
+        if (from > CurrentSchemaVersion)
+        {
+            App.LogInfo("Settings",
+                $"配置版本 v{from} 高于本程序支持的 v{CurrentSchemaVersion}（可能装过更新的版本）。保留原文件，不做降级改写。");
+            SchemaVersion = from;
+            return;
+        }
+
+        if (from < CurrentSchemaVersion)
+        {
+            // v1 → v2：0.0.2 只补版本号本身，字段结构未变，无需搬运数据。
+            // （后续版本在这里追加 case，并注意每一步都要能从 from 连续走到 Current。）
+            App.LogInfo("Settings", $"配置已从 v{from} 迁移到 v{CurrentSchemaVersion}");
+        }
+
+        SchemaVersion = CurrentSchemaVersion;
     }
 
     public void Save()
@@ -236,6 +306,87 @@ public sealed class DshSettings
     /// 超出的会话按"最近活动"排序后丢弃（仍在工作，只是不显示）。
     /// </summary>
     public int MaxIslands { get; set; } = 3;
+}
+
+/// <summary>
+/// 电源 / 电池（docs §5.8）。
+/// 台式机（无电池）整块静默：HasBattery=false 时源不会发任何事件。
+/// </summary>
+public sealed class PowerSettings
+{
+    /// <summary>整个模块总开关</summary>
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>插拔电源 / 开始充电 / 停止充电时提醒</summary>
+    public bool NotifyPlug { get; set; } = true;
+
+    /// <summary>低电量提醒（≤20% 且未充电，一次放电周期只提醒一次）</summary>
+    public bool NotifyLow { get; set; } = true;
+
+    /// <summary>充满提醒（接电充满 100% 时，一次充电周期只提醒一次）</summary>
+    public bool NotifyFull { get; set; } = true;
+
+    /// <summary>电源类胶囊停留秒数</summary>
+    public int TtlSeconds { get; set; } = 4;
+
+    /// <summary>低电量阈值（%）</summary>
+    public int LowPercent { get; set; } = 20;
+}
+
+/// <summary>
+/// 网络：Wi-Fi / 移动热点 / 飞行模式（docs §5.9–§5.11）。
+/// 三个信号共用这一组开关，因为它们属于同一个"无线连接"心智模型。
+/// </summary>
+public sealed class NetworkSettings
+{
+    /// <summary>整个模块总开关</summary>
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>Wi-Fi 连接 / 断开 / 切换时提醒</summary>
+    public bool Wifi { get; set; } = true;
+
+    /// <summary>
+    /// 让 Wi-Fi 岛常驻显示实时网速（上下行）。
+    /// 开启：连上 Wi-Fi 后岛不自动收起，胶囊里持续刷新速率；
+    /// 关闭：只在"连上 / 断开 / 切换"时短暂弹一次。
+    /// </summary>
+    public bool PinSpeed { get; set; }
+
+    /// <summary>移动热点开关与设备连接数变化时提醒</summary>
+    public bool Hotspot { get; set; } = true;
+
+    /// <summary>飞行模式开关时提醒</summary>
+    public bool Airplane { get; set; } = true;
+
+    /// <summary>网络类胶囊停留秒数</summary>
+    public int TtlSeconds { get; set; } = 4;
+}
+
+/// <summary>麦克风占用（docs §5.12）。与摄像头占用同一套"值级忽略"语义。</summary>
+public sealed class MicSettings
+{
+    /// <summary>整个模块总开关</summary>
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>麦克风胶囊停留秒数</summary>
+    public int TtlSeconds { get; set; } = 4;
+}
+
+/// <summary>
+/// 深浅色切换提示（docs §5.13）。
+/// 这里的"切换"指**系统外观**变化（设置界面或系统里改深/浅色），
+/// 同一个信号用太阳 / 月亮两个图标表达，因此只需要一组开关。
+/// </summary>
+public sealed class ThemeSwitchSettings
+{
+    /// <summary>整个模块总开关</summary>
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>系统外观切换时在岛上提示（太阳 = 浅色，月亮 = 深色）</summary>
+    public bool NotifyOnSwitch { get; set; } = true;
+
+    /// <summary>胶囊停留秒数</summary>
+    public int TtlSeconds { get; set; } = 3;
 }
 
 public sealed class GeneralSettings

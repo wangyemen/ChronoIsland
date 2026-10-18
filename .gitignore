@@ -33,3 +33,7 @@ designWeb/
 __trace.txt
 __*.txt
 __*.cs
+
+# 本地发布压缩包与自检渲染输出
+ChronoIsland-*-win-x64.zip
+.dsh-diag/
