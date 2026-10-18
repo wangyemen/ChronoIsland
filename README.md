@@ -40,7 +40,7 @@ Windows 桌面灵动岛。默认**屏幕上什么都没有**——来通知、�
 | 引入方式 | 只下载 SVG 源文件，**不引入任何 JS / 字体 / 运行时依赖** |
 | 本项目改动 | 仅去掉 `class` 属性、`stroke-width` 由 2 微调为 1.75；**几何路径原样保留** |
 
-图标文件在 <Assets/Icons/>（48 个 `.svg`），每个文件首行都保留了出处注释：
+图标文件在 <Assets/Icons/>（50 个 `.svg`），每个文件首行都保留了出处注释：
 
 ```
 <!-- play — Lucide play (ISC License, https://lucide.dev) -->
@@ -54,7 +54,7 @@ Windows 桌面灵动岛。默认**屏幕上什么都没有**——来通知、�
 **新增图标**：把 Lucide 的 `<name>.svg` 放进 <Assets/Icons/> 重新构建即可；若想在代码里按名字取用，
 再往 `Native/SvgIcons.Names` 里登记一下（该数组用于核对与设置页枚举）。
 
-图标清单（48 个）：
+图标清单（50 个）：
 
 | 分组 | 图标 |
 | --- | --- |
@@ -63,6 +63,7 @@ Windows 桌面灵动岛。默认**屏幕上什么都没有**——来通知、�
 | 电源 / 电池 | `battery` `battery-low` `battery-full` `battery-charging` `plug` |
 | 网络 | `wifi` `wifi-off` `router` `signal-high` `signal-medium` `signal-low` `signal-zero` `gauge` `arrow-down` `arrow-up` `smartphone` |
 | 飞行模式 | `plane` |
+| 蓝牙 | `bluetooth` `headphones` |
 | 深浅色 | `sun` `moon` `sun-moon`（一个太阳 + 一个月亮，深浅共用一个） |
 
 ### 自动更新备用下载源：jsDelivr（MIT / 开源 CDN）
@@ -84,7 +85,7 @@ Windows 桌面灵动岛。默认**屏幕上什么都没有**——来通知、�
 
 | 项目 | 用途 |
 | --- | --- |
-| [Lucide](https://lucide.dev) | 界面 48 个矢量图标（ISC） |
+| [Lucide](https://lucide.dev) | 界面 50 个矢量图标（ISC） |
 | [jsDelivr](https://www.jsdelivr.com) | 自动更新包备用下载源（国内网络回退） |
 | [FluidBar](https://github.com/search?q=FluidBar&type=repositories) | EventBus 架构、媒体会话优先级、应用图标提取链路 |
 | [WXRIW/Lyricify-Lyrics-Helper](https://github.com/WXRIW/Lyricify-Lyrics-Helper) | 歌词多源轮转、KRC / QRC 解密（通过 NuGet 包 `Lyricify.Lyrics.Helper` 引入） |
@@ -170,6 +171,7 @@ SDK 与 NuGet 缓存都在项目内 `.tools`，不写入 C 盘。
   - [x] **Wi-Fi 连接与实时网速** — SSID / 信号 / 协商速率，上下行速率每帧刷新（可常驻）
   - [x] **移动热点连接数** — 读 ICS 邻居表，设备接入 / 离开实时可见
   - [x] **飞行模式开关** — 同时区分「飞行模式下单独开 Wi-Fi」
+  - [x] **蓝牙连接与已连接设备** — 胶囊里直接显示设备名，展开看设备清单
   - [x] **麦克风占用提醒** — 读隐私授权库，零副作用，值级忽略与摄像头同语义
   - [x] **深色 / 浅色切换提示** — 太阳月亮合成图标 `sun-moon`，深浅共用一条岛
 - [x] 设置界面（玻璃拟态 + 弹簧动效）· 托盘 · 应用图标
@@ -184,5 +186,6 @@ ChronoIsland.exe sysprobe      :: 五类快照的真实读数
 ChronoIsland.exe sysdiff       :: 差分逻辑（注入假快照，不改机器状态）
 ChronoIsland.exe sysrender     :: 六类岛渲染 → PNG + 宽度 / 墨迹边距自检
 ChronoIsland.exe sysisland     :: 在线链路（源 → 总线 → 栈）
+ChronoIsland.exe wifiui        :: 网速显示稳定性（任意流量下胶囊宽度极差必须为 0）
 ChronoIsland.exe pillwidth     :: 全部胶囊宽度公式 vs 排版
 ```

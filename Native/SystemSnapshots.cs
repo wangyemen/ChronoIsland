@@ -65,3 +65,24 @@ public sealed record RadioSnapshot(bool AirplaneMode, bool WifiRadioOn);
 /// <param name="AppName">占用者的显示名（可能为空）</param>
 /// <param name="Users">同时在用的程序数</param>
 public sealed record MicSnapshot(bool Busy, string AppName, int Users);
+
+/// <summary>蓝牙连接快照（docs §5.14）。</summary>
+/// <param name="Supported">本机是否有可用蓝牙适配器（无蓝牙的台式机为 false，整块静默）</param>
+/// <param name="Devices">当前**已连接**的设备名（已去重排序；断开后为空）</param>
+/// <param name="PairedCount">已配对设备总数（含未连接），详情卡用来区分"一个都没配对"与"配对了但没连"</param>
+public sealed record BluetoothSnapshot(bool Supported, IReadOnlyList<string> Devices, int PairedCount)
+{
+    public int Count => Devices.Count;
+    public bool Any => Count > 0;
+
+    /// <summary>胶囊里显示的设备名：一台就写全名，多台显示第一台 + "等 N 台"</summary>
+    public string Display =>
+        Count switch
+        {
+            0 => "未连接",
+            1 => Devices[0],
+            _ => $"{Devices[0]} 等 {Count} 台"
+        };
+
+    public static readonly BluetoothSnapshot Unsupported = new(false, Array.Empty<string>(), 0);
+}

@@ -170,11 +170,30 @@ public static class SysIslandDiag
             Priority: 3, Title: "已连接 Wi-Fi", Subtitle: "JCG_WLAN",
             Payload: SystemStatusSource.LatestWifi ?? new WifiSnapshot(true, "demo", 80, 300, 0, 0, true),
             Policy: new IslandPolicy(null, Coalesce: false)));
+        // 【必须显式设为中央胶囊】前面第 2 节把每条岛轮流设成过 active，最后 "wifi" 停在球体位；
+        // 而 OnEvent 对"同 Id"走的是就地更新，不会抢焦点。不把它提回胶囊，
+        // 胶囊里的速率 TextBlock 根本不存在（球体不装胶囊内容）。
+        win.ProbeSetActive("wifi");
         Pump(300);
-        var sig0 = win.ProbeWifiLiveSignature();
+
+        // 【现在验的不是"签名变"，而是"文本在变、宽度不变"】
+        // 速率列改成定宽后，签名刻意不含速率（含了会每秒触发一次宽度重算，
+        // 那正是"闪一下"的来源）。真正要保证的是：
+        //   · SpeedText 每帧都写进 TextBlock（数字在动）
+        //   · 胶囊 MeasuredWidth 不变（不拽动弹簧）
+        var wifiItem = win.ProbeItems.FirstOrDefault(i => i.Event.Id == "wifi");
+        double width0 = wifiItem?.MeasuredWidth ?? 0;
+        string text0 = win.ProbeWifiPillText();
         Pump(2600);
-        var sig1 = win.ProbeWifiLiveSignature();
-        Check("速率文本在刷新（签名变化）", sig0 != sig1, $"'{sig0}' → '{sig1}'");
+        string text1 = win.ProbeWifiPillText();
+        double width1 = wifiItem?.MeasuredWidth ?? 0;
+
+        Check("胶囊里有速率文本（非空）", !string.IsNullOrEmpty(text1), $"'{text1}'");
+        Check("速率文案是两个方向（↓ 与 ↑ 都在）",
+            text1.Contains('↓') && text1.Contains('↑'), text1);
+        Check("胶囊宽度在刷新过程中保持不变",
+            Math.Abs(width1 - width0) < 0.5, $"{width0:0.0} → {width1:0.0}");
+        Check("刷新确实在发生（文本被写过）", text1 != "", $"'{text0}' → '{text1}'");
 
         // ---------------------------------------------------------------
         Console.WriteLine();

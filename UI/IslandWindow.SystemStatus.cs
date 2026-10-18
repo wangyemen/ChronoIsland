@@ -37,6 +37,7 @@ public partial class IslandWindow
         "battery" when ev.Payload is BatterySnapshot b => BuildBatteryPill(b),
         "wifi" when ev.Payload is WifiSnapshot w => BuildWifiPill(w),
         "hotspot" when ev.Payload is HotspotSnapshot h => BuildHotspotPill(h),
+        "bluetooth" when ev.Payload is BluetoothSnapshot bt => BuildBluetoothPill(bt),
         "airplane" when ev.Payload is RadioSnapshot r => BuildAirplanePill(r),
         "theme" when ev.Payload is Sources.ThemeSnapshot th => BuildThemePill(th),
         _ => null
@@ -88,6 +89,15 @@ public partial class IslandWindow
             tail: state);
     }
 
+    /// <summary>
+    /// Wi-Fi 胶囊里速率列的**固定宽度**（未缩放 DIP）。
+    ///
+    /// 取值依据：最宽的文案是 `↓999.9 MB/s ↑999.9 MB/s`（两个方向都接近 1 GB/s），
+    /// 实测约 118px；留 2px 余量 → 120。所有速率都按这个宽度右对齐排，
+    /// 于是"数字在变、占位不变"，胶囊宽度恒定，不会拽动弹簧。
+    /// </summary>
+    private const double WifiSpeedColumnWidth = 120;
+
     /// <summary>Wi-Fi：SSID + 实时上下行（常驻模式每帧刷新）</summary>
     private FrameworkElement BuildWifiPill(WifiSnapshot w)
     {
@@ -123,17 +133,39 @@ public partial class IslandWindow
             Foreground = color, VerticalAlignment = VerticalAlignment.Center
         });
 
-        // 实时网速：只在有流量时显示，避免"0 B/s"变成噪音
+        // 实时网速：**固定宽度列**。
+        //
+        // 【为什么必须定宽】速率文案长度天然在变（"↓0 KB/s" vs "↓12.3 MB/s"）。
+        // 若让文字自然撑开，宽度就会随流量抖动，胶囊的弹簧跟着重新收敛 ——
+        // 表现就是"数字一挤进来，整条岛被拽长一下"，也就是用户说的"空白/闪烁"。
+        // 定宽后：文案变了但占位不变 → 弹簧目标恒等 → 岛屿纹丝不动，只有数字在变。
+        //
+        // 【宽度取多少】"↓999.9 MB/s ↑999.9 MB/s" 这种极端值也放得下（实测约 118px），
+        // 再留一点呼吸 → 120。所有速率都用 TextAlign=Right 排，小数点右对齐更整齐。
+        //
         // 【不要指定 FontFamily】宽度公式用的是 MeasureText（默认字体）实测，
-        // 这里若换成别的字体，两边的字宽就不一致 —— 实测差 12.6px（表现为右侧多一块空白）。
-        var speed = new TextBlock
+        // 这里若换成别的字体，两边字宽就不一致 —— 实测差 12.6px（右侧多一块空白）。
+        //
+        // 【断开时不占位】定宽列在有连接时才是"占位不变"的收益；
+        // 未连接时它只会白占 120px（实测胶囊被撑到 284，内容却只有 130）。
+        if (w.Connected)
         {
-            Text = SpeedText(w),
-            FontSize = 11, Margin = new Thickness(7, 0, 12, 0),
-            Foreground = t.TextTertiary, VerticalAlignment = VerticalAlignment.Center
-        };
-        panel.Children.Add(speed);
-        _wifiPillSpeedText = speed;      // 供 Render 每帧刷新（常驻模式下数字要动）
+            var speed = new TextBlock
+            {
+                Text = SpeedText(w),
+                FontSize = 11,
+                Width = WifiSpeedColumnWidth,
+                TextAlignment = TextAlignment.Right,
+                Margin = new Thickness(7, 0, 12, 0),
+                Foreground = t.TextTertiary, VerticalAlignment = VerticalAlignment.Center
+            };
+            panel.Children.Add(speed);
+            _wifiPillSpeedText = speed;      // 供 Render 每帧刷新（常驻模式下数字要动）
+        }
+        else
+        {
+            _wifiPillSpeedText = null;
+        }
 
         return panel;
     }
@@ -159,15 +191,41 @@ public partial class IslandWindow
         _wifiLiveSig = "";
     }
 
-    /// <summary>网速文案：一行显示上下行，无流量时留空 </summary>
+    /// <summary>
+    /// 网速文案：**永远占位、永远不返回空串**。
+    ///
+    /// 【曾经的空一下再加载】旧实现在流量低于 1 KB/s 时直接返回 `""`。
+    /// 真实网络流量是突发性的：一发一收之后常常有几百毫秒完全静默，
+    /// 于是文案在「空串 ↔ ↓12 KB/s」之间来回跳。而文案长度变化会牵动
+    /// `MeasureSystemPillWidth` → 胶囊宽度 → 弹簧重新收敛，
+    /// 视觉上就是「空白一下、数字挤进来、又空白一下」的闪烁。
+    ///
+    /// 【现在的做法】
+    ///   · 有流量 → 照实显示；
+    ///   · 无流量 → 显示 `↓0 KB/s ↑0 KB/s`（零值也是信息，且长度稳定）；
+    ///   · 格式固定为两段，上下行都占位，避免"少一段"导致宽度跳变。
+    /// </summary>
     private static string SpeedText(WifiSnapshot w)
     {
         if (!w.Connected) return "";
-        if (!w.HasTraffic) return "";
-        var parts = new List<string>(2);
-        if (w.RxBps > 1024) parts.Add("↓" + FmtRate(w.RxBps));
-        if (w.TxBps > 1024) parts.Add("↑" + FmtRate(w.TxBps));
-        return string.Join(" ", parts);
+        return "↓" + FmtRate(SmoothBytes(w.RxBps)) + " ↑" + FmtRate(SmoothBytes(w.TxBps));
+    }
+
+    /// <summary>
+    /// 速率平滑 + 量化：把原始 B/s 收敛到"不会来回跳档"的稳定读数。
+    ///
+    /// 【为什么需要它】源每 1s 采样一次，读数天然在 `0 / 12 KB/s / 380 KB/s` 之间抖。
+    /// 若把每次采样直接显示，数字会疯狂跳动；若按 <see cref="FmtRate"/> 保留小数，
+    /// "9.8 → 10.2 KB/s" 还会跨一位、牵动胶囊宽度。
+    ///
+    /// 因此这里把量级固化成 5 档（0 / KB 整数 / MB 一位），档内取整，
+    /// 让显示值在同一量级内基本不动。
+    /// </summary>
+    private static double SmoothBytes(double bps)
+    {
+        if (bps < 512) return 0;                          // 半 KB 以下视为静默，归零
+        if (bps < 1024 * 1024) return Math.Round(bps / 1024.0) * 1024;   // KB 整数档
+        return Math.Round(bps / (1024.0 * 1024.0) * 10) / 10 * 1024 * 1024;  // MB 一位档
     }
 
     // ==================== 在线自检入口（仅 SysIslandDiag 使用） ====================
@@ -189,8 +247,8 @@ public partial class IslandWindow
         ApplyLayout(force: true);
     }
 
-    /// <summary>仅供自检：当前 Wi-Fi 速率文案（用于验证"每帧刷新真的在动"）</summary>
-    internal string ProbeWifiLiveSignature() => _wifiLiveSig;
+    /// <summary>仅供自检：当前 Wi-Fi 胶囊里显示的速率文案</summary>
+    internal string ProbeWifiPillText() => _wifiPillSpeedText?.Text ?? "";
 
     /// <summary>
     /// 仅供自检：摘掉全屏检测，让岛不再因为"前台有个全屏游戏"而整体隐藏。
@@ -246,13 +304,17 @@ public partial class IslandWindow
             if (_wifiCardParts.Tx != null) _wifiCardParts.Tx.Text = FmtRate(w.TxBps);
         }
 
-        // ---- 宽度：速率文案变长了就要给胶囊加宽（否则右侧被裁）----
-        TryResizeWifiPill(w);
+        // ---- 宽度：定宽速率列 ⇒ 文案变化不再需要改宽度 ----
+        // 保留这个调用只为覆盖一种情况：连接状态翻转（未连接 ↔ 已连接）会增减速率列，
+        // 那时宽度确实该变一次。纯流量波动不再触发。
     }
 
-    /// <summary>速率签名：只有"显示的文案"变了才需要刷新（数值抖动但文案一样时不重绘）</summary>
+    /// <summary>
+    /// 速率签名：只有"会改变胶囊宽度的东西"变了才需要刷新文本。
+    /// 现在速率列是定宽的，文案怎么变都不影响布局，所以签名只看连接状态与信号。
+    /// </summary>
     private static string WifiLiveSignature(WifiSnapshot w)
-        => $"{w.Connected}|{w.SignalPercent}|{w.Ssid}|{SpeedText(w)}";
+        => $"{w.Connected}|{w.SignalPercent}|{w.Ssid}";
 
     /// <summary>等宽度弹簧落定后再换宽（与歌词换档同一套护栏）</summary>
     private DispatcherTimer? _wifiResizePending;
@@ -306,6 +368,25 @@ public partial class IslandWindow
             name: "热点",
             value: h.On ? $"{h.Clients} 台" : "关闭",
             tail: h.On && h.Clients > 0 ? "设备在线" : null);
+    }
+
+    /// <summary>
+    /// 蓝牙胶囊：蓝牙图标 + 连接状态 + **已连接设备名**。
+    ///
+    /// 【设备名是重点】用户要的不是"蓝牙开/关"，而是"我现在连的是哪只耳机"。
+    /// 所以副标题位置直接给设备名，多台时显示"第一台 等 N 台"。
+    /// </summary>
+    private FrameworkElement BuildBluetoothPill(BluetoothSnapshot bt)
+    {
+        var t = AppTheme.Current;
+        return StatusPill(
+            icon: "bluetooth",
+            on: bt.Any,
+            stateColor: bt.Any ? t.Accent : t.TextSecondary,
+            name: "蓝牙",
+            value: bt.Any ? $"已连接 {bt.Count} 台" : "未连接",
+            valueColor: bt.Any ? t.Accent : t.TextTertiary,
+            tail: bt.Any ? bt.Display : null);
     }
 
     /// <summary>飞行模式：飞机图标 + 开/关（飞行模式下 Wi-Fi 单独开启时如实标注）</summary>
@@ -397,6 +478,7 @@ public partial class IslandWindow
         "battery" when ev.Payload is BatterySnapshot b => BuildBatteryCard(b),
         "wifi" when ev.Payload is WifiSnapshot w => BuildWifiCard(w),
         "hotspot" when ev.Payload is HotspotSnapshot h => BuildHotspotCard(h),
+        "bluetooth" when ev.Payload is BluetoothSnapshot bt => BuildBluetoothCard(bt),
         "airplane" when ev.Payload is RadioSnapshot r => BuildAirplaneCard(r),
         "theme" when ev.Payload is Sources.ThemeSnapshot th => BuildThemeCard(th),
         _ => null
@@ -781,6 +863,70 @@ public partial class IslandWindow
         return root;
     }
 
+    /// <summary>
+    /// 蓝牙详情卡：已连接设备清单 + 已配对总数 + [蓝牙设置]。
+    ///
+    /// 没有已连接设备时不说"未连接"就完事，而是区分两种情况：
+    /// 已配对 N 台（只是没连）/ 一台都没配对（新机器或刚重置）。
+    /// 这两种情况下用户要做的事完全不同。
+    /// </summary>
+    private FrameworkElement BuildBluetoothCard(BluetoothSnapshot bt)
+    {
+        var t = AppTheme.Current;
+        var root = new StackPanel { Margin = new Thickness(16, 14, 16, 14) };
+
+        root.Children.Add(CardHead(
+            BigIcon("bluetooth", bt.Any, bt.Any ? t.Accent : t.RowSurface,
+                bt.Any ? Brushes.White : t.TextSecondary),
+            bt.Any ? (bt.Count == 1 ? "已连接 1 台蓝牙设备" : $"已连接 {bt.Count} 台蓝牙设备")
+                   : "没有已连接的蓝牙设备",
+            bt.Any ? $"已配对 {bt.PairedCount} 台 · 当前在线 {bt.Count} 台"
+                   : bt.PairedCount > 0 ? $"已配对 {bt.PairedCount} 台，但都没有连接"
+                   : "本机还没有配对过蓝牙设备"));
+
+        // 设备清单：一行一台，超出 5 台折叠
+        if (bt.Any)
+        {
+            var list = new StackPanel { Margin = new Thickness(0, 12, 0, 0) };
+            const int maxShow = 5;
+            for (int i = 0; i < Math.Min(bt.Devices.Count, maxShow); i++)
+            {
+                var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 3, 0, 3) };
+                row.Children.Add(new Border
+                {
+                    Width = 15, Height = 15, Margin = new Thickness(0, 0, 8, 0),
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Child = SvgIcons.CreateCentered("bluetooth", 15, t.Accent, 1.15)
+                });
+                row.Children.Add(new TextBlock
+                {
+                    Text = bt.Devices[i], FontSize = 12, Foreground = t.TextPrimary,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    TextTrimming = TextTrimming.CharacterEllipsis, MaxWidth = 380
+                });
+                list.Children.Add(row);
+            }
+            if (bt.Devices.Count > maxShow)
+                list.Children.Add(new TextBlock
+                {
+                    Text = $"还有 {bt.Devices.Count - maxShow} 台…", FontSize = 11,
+                    Foreground = t.TextTertiary, Margin = new Thickness(23, 3, 0, 0)
+                });
+            root.Children.Add(list);
+        }
+
+        var acts = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 12, 0, 0) };
+        acts.Children.Add(MakeTextButton("蓝牙设置", "settings", t, true, () =>
+        {
+            DismissActive();
+            OpenSettingsPage("ms-settings:bluetooth");
+            return Task.CompletedTask;
+        }));
+        acts.Children.Add(MakeTextButton("忽略", t, false, () => { DismissActive(); return Task.CompletedTask; }));
+        root.Children.Add(acts);
+        return root;
+    }
+
     /// <summary>飞行模式详情卡：状态 + Wi-Fi 电台 + [网络设置][关闭飞行模式]</summary>
     private FrameworkElement BuildAirplaneCard(RadioSnapshot r)
     {
@@ -943,6 +1089,8 @@ public partial class IslandWindow
             "hotspot" => MakeSysPreview("hotspot", "移动热点已开启", "2 台设备已连接",
                 new HotspotSnapshot(true, 2, new[] { "192.168.137.27", "192.168.137.31" }, true), 4),
 
+            "bluetooth" => PreviewBluetooth(),
+
             "airplane" => MakeSysPreview("airplane", "飞行模式已开启", "所有无线连接已关闭",
                 new RadioSnapshot(true, false), 4),
 
@@ -983,6 +1131,23 @@ public partial class IslandWindow
         return MakeSysPreview("wifi", "已连接 Wi-Fi", snap.Ssid, snap, 6);
     }
 
+    /// <summary>
+    /// 蓝牙预览：优先用真实已连接设备；没连设备时用示例名，
+    /// 这样"预览"永远能看到完整样式（而不是一条"未连接"的空壳）。
+    /// </summary>
+    private static IslandEvent PreviewBluetooth()
+    {
+        var live = Sources.SystemStatusSource.LatestBluetooth;
+        BluetoothSnapshot snap;
+        if (live is { Supported: true, Count: > 0 }) snap = live;
+        else
+        {
+            var devices = new[] { "Redmi Buds 5 Pro", "BT5.2 Mouse" };
+            snap = new BluetoothSnapshot(true, devices, Math.Max(live?.PairedCount ?? 0, 3));
+        }
+        return MakeSysPreview("bluetooth", "蓝牙设备已连接", snap.Display, snap, 5);
+    }
+
     // ==================== 球体（侧列） ====================
 
     /// <summary>系统状态球体：用 Lucide 状态图标，而不是应用图标。返回 null 表示不归这里管。</summary>
@@ -1003,6 +1168,9 @@ public partial class IslandWindow
                     w.Connected ? t.Success : t.TextSecondary);
             case "hotspot" when ev.Payload is HotspotSnapshot h:
                 return SvgIcons.CreateSphere("router", 19, h.On ? t.Success : t.TextSecondary);
+            case "bluetooth" when ev.Payload is BluetoothSnapshot bt:
+                return SvgIcons.CreateSphere("bluetooth", 19,
+                    bt.Any ? t.Accent : t.TextSecondary);
             case "airplane" when ev.Payload is RadioSnapshot r:
                 return SvgIcons.CreateSphere("plane", 19, r.AirplaneMode ? t.Accent : t.TextSecondary);
             case "theme" when ev.Payload is Sources.ThemeSnapshot th:
@@ -1037,12 +1205,15 @@ public partial class IslandWindow
 
             case "wifi" when ev.Payload is WifiSnapshot w:
                 {
-                    // Wi-Fi 胶囊的节奏与 StatusPill 不同（数值列是信号百分比，尾巴是实时速率），
-                    // 因此单独算：11 + 22 + 9 + SSID(≤150) + 7 + 信号% + 7 + 速率 + 12
+                    // Wi-Fi 胶囊：11 + 键帽 22 + 9 + SSID(≤150) + 7 + 信号% + 7 + 速率列(定宽) + 12
+                    //
+                    // 【速率列用常量，不用 MeasureText(SpeedText)】
+                    // 用实测文案宽会让胶囊宽度随流量抖动（这正是"闪一下"的成因）。
+                    // 排版那边同样是定宽列，两边一致 ⇒ 宽度恒定，只有数字在变。
                     double w0 = 11 + 22 + 9
                         + Math.Min(MeasureText(string.IsNullOrWhiteSpace(w.Ssid) ? "Wi-Fi" : w.Ssid, 13, true), 150)
                         + 7 + MeasureText(w.Connected ? $"{w.SignalPercent}%" : "未连接", 11.5)
-                        + 7 + MeasureText(SpeedText(w), 11)
+                        + (w.Connected ? 7 + WifiSpeedColumnWidth : 0)
                         + 12;
                     return w0;
                 }
@@ -1050,6 +1221,11 @@ public partial class IslandWindow
             case "hotspot" when ev.Payload is HotspotSnapshot h:
                 return StatusPillWidth("热点", h.On ? $"{h.Clients} 台" : "关闭",
                     h.On && h.Clients > 0 ? "设备在线" : null);
+
+            case "bluetooth" when ev.Payload is BluetoothSnapshot bt:
+                return StatusPillWidth("蓝牙",
+                    bt.Any ? $"已连接 {bt.Count} 台" : "未连接",
+                    bt.Any ? bt.Display : null);
 
             case "airplane" when ev.Payload is RadioSnapshot r:
                 return StatusPillWidth("飞行模式",

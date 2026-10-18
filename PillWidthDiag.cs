@@ -63,6 +63,8 @@ public static class PillWidthDiag
             ("Wi-Fi",     () => MakeWifi(true)),
             ("Wi-Fi断",   () => MakeWifi(false)),
             ("热点",      () => MakeHotspot(2)),
+            ("蓝牙1台",   () => MakeBluetooth(1)),
+            ("蓝牙2台",   () => MakeBluetooth(2)),
             ("飞行模式",  () => MakeAirplane(true, false)),
             ("深色模式",  () => MakeTheme(true)),
             ("浅色模式",  () => MakeTheme(false)),
@@ -317,8 +319,20 @@ public static class PillWidthDiag
                   Enumerable.Range(1, clients).Select(i => $"192.168.137.{20 + i}").ToList(), true))
         { AppKey = "hotspot" };
 
-    private static Core.IslandEvent MakeAirplane(bool on, bool wifiOn)
-        => new Core.IslandEvent("airplane", "airplane", "airplane", 3,
+    private static Core.IslandEvent MakeBluetooth(int count)
+    {
+        var names = new[] { "Redmi Buds 5 Pro", "BT5.2 Mouse", "EWEADN X23 Pro" };
+        var devices = names.Take(count).ToList();
+        var snap = new ChronoIsland.Native.BluetoothSnapshot(true, devices, 8);
+        return new Core.IslandEvent("bluetooth", "bluetooth", "bluetooth", 3,
+              count == 1 ? "蓝牙设备已连接" : $"已连接 {count} 台蓝牙设备",
+              snap.Display,
+              Policy: new Core.IslandPolicy(TimeSpan.FromSeconds(4)),
+              Payload: snap)
+        { AppKey = "bluetooth" };
+    }
+
+    private static Core.IslandEvent MakeAirplane(bool on, bool wifiOn)        => new Core.IslandEvent("airplane", "airplane", "airplane", 3,
               on ? "飞行模式已开启" : "飞行模式已关闭",
               on ? (wifiOn ? "无线已关闭 · Wi-Fi 仍开启" : "所有无线连接已关闭") : "无线连接已恢复",
               Policy: new Core.IslandPolicy(TimeSpan.FromSeconds(4)),

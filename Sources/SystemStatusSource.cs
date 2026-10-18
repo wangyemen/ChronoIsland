@@ -21,6 +21,7 @@ public interface ISystemSnapshotProvider
     HotspotSnapshot ReadHotspot();
     MicSnapshot ReadMicrophone();
     RadioSnapshot ReadRadio();
+    BluetoothSnapshot ReadBluetooth();
 }
 
 /// <summary>默认提供者：读真实系统（docs §5.8–§5.12）</summary>
@@ -31,6 +32,13 @@ public sealed class RealSystemSnapshotProvider : ISystemSnapshotProvider
     public HotspotSnapshot ReadHotspot() => SystemProbe.ReadHotspot();
     public MicSnapshot ReadMicrophone() => SystemProbe.ReadMicrophone();
     public RadioSnapshot ReadRadio() => SystemProbe.ReadRadio();
+    public BluetoothSnapshot ReadBluetooth()
+    {
+        var r = BluetoothProbe.Read();
+        return r.Supported
+            ? new BluetoothSnapshot(true, r.Connected, r.PairedCount)
+            : BluetoothSnapshot.Unsupported;
+    }
 }
 
 /// <summary>
@@ -64,6 +72,7 @@ public sealed class SystemStatusSource : IEventSource
     private HotspotSnapshot? _hotspot;
     private MicSnapshot? _mic;
     private RadioSnapshot? _radio;
+    private BluetoothSnapshot? _bluetooth;
 
     // 首次采样只建基线
     private bool _seeded;
@@ -81,6 +90,7 @@ public sealed class SystemStatusSource : IEventSource
     private static volatile HotspotSnapshot? s_hotspot;
     private static volatile MicSnapshot? s_mic;
     private static volatile RadioSnapshot? s_radio;
+    private static volatile BluetoothSnapshot? s_bluetooth;
 
     /// <summary>最新 Wi-Fi 快照（未采样过时为 null）</summary>
     public static WifiSnapshot? LatestWifi => s_wifi;
@@ -92,6 +102,8 @@ public sealed class SystemStatusSource : IEventSource
     public static MicSnapshot? LatestMic => s_mic;
     /// <summary>最新电台 / 飞行模式快照</summary>
     public static RadioSnapshot? LatestRadio => s_radio;
+    /// <summary>最新蓝牙快照</summary>
+    public static BluetoothSnapshot? LatestBluetooth => s_bluetooth;
 
     /// <summary>网速读数变化时触发（UI 用来在常驻卡里刷数字，不产生事件）</summary>
     public static event Action<WifiSnapshot>? WifiSpeedChanged;
@@ -128,7 +140,20 @@ public sealed class SystemStatusSource : IEventSource
 
     private volatile bool _islandVisible;
 
-    public void Configure(Settings s) => _settings = s ?? new Settings();
+    public void Configure(Settings s)
+    {
+        bool pinBefore = _settings.Network.PinSpeed;
+        _settings = s ?? new Settings();
+
+        // 【常驻开关改完要立刻生效】以前只在下一次"连接/切换/断开"时才重新算 Policy，
+        // 于是打开"常驻显示网速"后要等换一次网才看得出效果 —— 用户会以为开关坏了。
+        // 这里检测到 PinSpeed 翻转就主动重发一条 WiFi 事件，把 Policy.Ttl 就地刷成新值。
+        if (pinBefore != _settings.Network.PinSpeed && _wifi is { Connected: true })
+        {
+            App.LogInfo("System", $"常驻显示网速 → {(_settings.Network.PinSpeed ? "开" : "关")}，立即刷新 WiFi 岛");
+            EmitWifi(_wifi, _settings, "已连接 Wi-Fi", _wifi.Ssid);
+        }
+    }
 
     public void Dispose() => _timer?.Dispose();
 
@@ -173,6 +198,17 @@ public sealed class SystemStatusSource : IEventSource
                 }
             }
 
+            // ---- 蓝牙：3s ----
+            // 【为什么 3s 而不是 1s】每次扫描要逐台 FromIdAsync（实测 200–500ms），
+            // 1s 一次等于常驻 30% 的单核占用。耳机/鼠标的连接变化以秒计，3s 完全够。
+            if ((first || _tick % 3 == 0) && s.Network.Enabled && s.Network.Bluetooth)
+            {
+                var bt = _probe.ReadBluetooth();
+                s_bluetooth = bt;
+                if (_seeded) DiffBluetooth(bt);
+                _bluetooth = bt;
+            }
+
             // ---- 飞行模式：3s（关掉一次 WiFi 要等网络栈刷新，太快会读到中间态）----
             if ((first || _tick % 3 == 0) && s.Network.Enabled && s.Network.Airplane)
             {
@@ -201,7 +237,8 @@ public sealed class SystemStatusSource : IEventSource
                     + $"Wi-Fi={DescribeWifi(s_wifi)} · "
                     + $"热点={DescribeHotspot(s_hotspot)} · "
                     + $"麦克风={(s_mic?.Busy == true ? "占用" : "空闲")} · "
-                    + $"飞行模式={((s_radio?.AirplaneMode) == true ? "开" : "关")}");
+                    + $"飞行模式={((s_radio?.AirplaneMode) == true ? "开" : "关")} · "
+                    + $"蓝牙={DescribeBluetooth(s_bluetooth)}");
             }
         }
         catch (Exception ex) { App.Log("System", ex); }
@@ -222,6 +259,12 @@ public sealed class SystemStatusSource : IEventSource
         => h == null ? "未采集"
          : !h.Supported ? "不支持（无 Wi-Fi 网卡）"
          : h.On ? $"开启 · {h.Clients} 台设备" : "关闭";
+
+    private static string DescribeBluetooth(BluetoothSnapshot? b)
+        => b == null ? "未采集"
+         : !b.Supported ? "无蓝牙适配器（静默）"
+         : b.Any ? $"{b.Count} 台已连接（{b.Display}）"
+         : $"未连接（已配对 {b.PairedCount} 台）";
 
     // ================= Wi-Fi（docs §5.9） =================
 
@@ -270,6 +313,65 @@ public sealed class SystemStatusSource : IEventSource
                 pin ? null : TimeSpan.FromSeconds(ttl),
                 Coalesce: true, Expandable: true, HoverPauses: true, QueueWhenHidden: false))
         { AppKey = "wifi", StealFocus = pin });
+    }
+
+    // ================= 蓝牙（docs §5.14） =================
+
+    /// <summary>
+    /// 蓝牙连接差分：某台设备接入 / 离开时发事件。
+    ///
+    /// 【为什么按"设备集合"比较，而不是按"数量"】
+    /// 换设备时数量可能完全不变（断 A 连 B 都是 1 台），只看数量会漏掉整个变化。
+    /// 因此比较的是**名称集合**的差集，并在事件里说清"哪台进了/哪台走了"。
+    /// </summary>
+    private void DiffBluetooth(BluetoothSnapshot bt)
+    {
+        var prev = _bluetooth;
+        if (prev == null) return;
+        if (!bt.Supported) return;               // 没有蓝牙适配器：整块静默
+        if (prev.Supported != bt.Supported) return;   // 适配器刚插拔，等下一轮稳定
+
+        var added = bt.Devices.Except(prev.Devices, StringComparer.OrdinalIgnoreCase).ToList();
+        var removed = prev.Devices.Except(bt.Devices, StringComparer.OrdinalIgnoreCase).ToList();
+        if (added.Count == 0 && removed.Count == 0) return;
+
+        string title, sub;
+        bool notify = true;
+
+        if (added.Count > 0)
+        {
+            title = added.Count == 1 ? "蓝牙设备已连接" : $"已连接 {added.Count} 台蓝牙设备";
+            sub = added.Count == 1
+                ? added[0] + (bt.Count > 1 ? $"（共 {bt.Count} 台）" : "")
+                : string.Join("、", added);
+        }
+        else
+        {
+            title = removed.Count == 1 ? "蓝牙设备已断开" : $"已断开 {removed.Count} 台蓝牙设备";
+            sub = removed.Count == 1
+                ? removed[0] + (bt.Count > 0 ? $"（仍连接 {bt.Count} 台）" : "")
+                : string.Join("、", removed);
+            // 全部断开时副标题直接说"当前无设备"，比堆一串设备名更清楚
+            if (bt.Count == 0 && removed.Count == 1) sub = removed[0];
+        }
+
+        if (!notify) return;
+
+        App.LogInfo("System", $"蓝牙：{title} — {sub}");
+        int ttl = Math.Max(2, _settings.Network.TtlSeconds);
+        // 连接时优先级抬一档：刚戴上耳机/键盘想立刻看到反馈；断开则不打断当前操作
+        bool isConnect = added.Count > 0;
+        _bus?.Publish(new IslandEvent(
+            Id: "bluetooth",
+            SourceKey: "bluetooth",
+            Kind: "bluetooth",
+            Priority: isConnect ? Priority + 1 : Priority,
+            Title: title,
+            Subtitle: sub,
+            Payload: bt,
+            Policy: new IslandPolicy(TimeSpan.FromSeconds(ttl), Coalesce: true, Expandable: true,
+                HoverPauses: true, QueueWhenHidden: false))
+        { AppKey = "bluetooth", StealFocus = isConnect });
     }
 
     // ================= 移动热点（docs §5.10） =================

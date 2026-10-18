@@ -355,6 +355,9 @@ public sealed class NetworkSettings
     /// <summary>移动热点开关与设备连接数变化时提醒</summary>
     public bool Hotspot { get; set; } = true;
 
+    /// <summary>蓝牙设备连接 / 断开时提醒（docs §5.14）</summary>
+    public bool Bluetooth { get; set; } = true;
+
     /// <summary>飞行模式开关时提醒</summary>
     public bool Airplane { get; set; } = true;
 

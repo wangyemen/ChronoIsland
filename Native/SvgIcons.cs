@@ -48,7 +48,8 @@ public static class SvgIcons
         "mic", "mic-off", "battery", "battery-low", "battery-full", "battery-charging",
         "plug", "wifi", "wifi-off", "router", "plane", "sun", "moon", "sun-moon",
         "arrow-down", "arrow-up", "smartphone", "gauge",
-        "signal-high", "signal-medium", "signal-low", "signal-zero"
+        "signal-high", "signal-medium", "signal-low", "signal-zero",
+        "bluetooth", "headphones"
     };
 
     /// <summary>Lucide 统一 viewBox 边长</summary>

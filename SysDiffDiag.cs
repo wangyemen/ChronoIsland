@@ -29,12 +29,14 @@ public static class SysDiffDiag
         public HotspotSnapshot Hotspot = new(true, 0, Array.Empty<string>(), true);
         public MicSnapshot Mic = new(false, "", 0);
         public RadioSnapshot Radio = new(false, true);
+        public BluetoothSnapshot Bluetooth = new(true, Array.Empty<string>(), 3);
 
         public WifiSnapshot ReadWifi() => Wifi;
         public BatterySnapshot ReadBattery() => Battery;
         public HotspotSnapshot ReadHotspot() => Hotspot;
         public MicSnapshot ReadMicrophone() => Mic;
         public RadioSnapshot ReadRadio() => Radio;
+        public BluetoothSnapshot ReadBluetooth() => Bluetooth;
     }
 
     /// <summary>收集源发出的所有事件（不走 UI，直接看总线出口）</summary>
@@ -87,6 +89,12 @@ public static class SysDiffDiag
         // ================= Wi-Fi =================
         Console.WriteLine();
         Console.WriteLine("Wi-Fi（docs §5.9）");
+        // 【必须先关掉常驻】本机 settings.json 里 PinSpeed 可能已被前一次设置操作写成 true，
+        // 那样第一条 wifi 事件的 TTL 就是 null，"不常驻时应带 TTL"这条断言会假失败。
+        var plain = Core.Settings.Load();
+        plain.Network.PinSpeed = false;
+        src.Configure(plain);
+
         fake.Wifi = new WifiSnapshot(true, "Home_5G", 82, 866, 0, 0, true);
         Pump(src);
         var wifiUp = sink.Of("wifi").LastOrDefault();
@@ -125,7 +133,6 @@ public static class SysDiffDiag
             pinned?.Policy?.Ttl?.ToString() ?? "null");
         Check("常驻模式下抢焦点", pinned?.StealFocus == true);
         src.Configure(settings);
-
         // ================= 移动热点 =================
         Console.WriteLine();
         Console.WriteLine("移动热点（docs §5.10）");
@@ -219,6 +226,69 @@ public static class SysDiffDiag
         fake.Battery = new BatterySnapshot(false, 0, false, true, 0, false);
         Pump(src);
         Check("无电池（台式机）整块静默", sink.Of("battery").Count() == 0);
+
+        // ================= 蓝牙 =================
+        Console.WriteLine();
+        Console.WriteLine("蓝牙（docs §5.14）");
+
+        // 连接一台
+        sink.Clear();
+        fake.Bluetooth = new BluetoothSnapshot(true, new[] { "Redmi Buds 5 Pro" }, 3);
+        Pump(src);
+        var btOn = sink.Of("bluetooth").LastOrDefault();
+        Check("设备连接会发事件", btOn?.Title == "蓝牙设备已连接", btOn?.Title ?? "");
+        Check("副标题带设备名", btOn?.Subtitle?.Contains("Redmi Buds 5 Pro") == true, btOn?.Subtitle ?? "");
+        Check("连接时优先级 +1（更醒目）", (btOn?.Priority ?? 0) > src.Priority, $"priority={btOn?.Priority}");
+
+        // 再连一台：数量 1→2。标题说的是"新增了哪些"，不是总数
+        sink.Clear();
+        fake.Bluetooth = new BluetoothSnapshot(true, new[] { "Redmi Buds 5 Pro", "BT5.2 Mouse" }, 3);
+        Pump(src);
+        var btMore = sink.Of("bluetooth").LastOrDefault();
+        Check("第二台接入会发事件", btMore != null, btMore?.Title ?? "");
+        Check("只报新增的那台（不重复报已在线的）",
+            btMore?.Subtitle?.Contains("BT5.2 Mouse") == true
+            && btMore?.Subtitle?.Contains("Redmi Buds 5 Pro") != true,
+            btMore?.Subtitle ?? "");
+
+        // 断一台（还剩一台）
+        sink.Clear();
+        fake.Bluetooth = new BluetoothSnapshot(true, new[] { "Redmi Buds 5 Pro" }, 3);
+        Pump(src);
+        var btOff = sink.Of("bluetooth").LastOrDefault();
+        Check("设备断开会发事件", btOff?.Title == "蓝牙设备已断开", btOff?.Title ?? "");
+        Check("副标题带断开设备名", btOff?.Subtitle?.Contains("BT5.2 Mouse") == true, btOff?.Subtitle ?? "");
+
+        // 【换设备：数量不变但集合变了】只看数量会漏掉
+        sink.Clear();
+        fake.Bluetooth = new BluetoothSnapshot(true, new[] { "EWEADN X23 Pro" }, 3);
+        Pump(src);
+        Check("换设备（数量不变、集合变了）也能识别",
+            sink.Of("bluetooth").Count() >= 1,
+            $"事件 {sink.Of("bluetooth").Count()} 条");
+
+        // 全部断开
+        sink.Clear();
+        fake.Bluetooth = new BluetoothSnapshot(true, Array.Empty<string>(), 3);
+        Pump(src);
+        Check("全部断开 → 事件 + 设备名",
+            sink.Of("bluetooth").LastOrDefault()?.Title == "蓝牙设备已断开",
+            sink.Of("bluetooth").LastOrDefault()?.Title ?? "");
+
+        // 状态没变不重复发
+        sink.Clear();
+        Pump(src);
+        Check("状态未变不重复发", sink.Of("bluetooth").Count() == 0);
+
+        // 无蓝牙适配器 → 整块静默
+        sink.Clear();
+        fake.Bluetooth = BluetoothSnapshot.Unsupported;
+        Pump(src);
+        fake.Bluetooth = new BluetoothSnapshot(true, new[] { "X" }, 1);
+        Pump(src);
+        Check("无蓝牙适配器时静默（不因插拔适配器乱弹）",
+            !sink.Of("bluetooth").Any(e => e.Title.Contains("已连接") && e.Subtitle == "X"),
+            $"{sink.Of("bluetooth").Count()} 条");
 
         // ================= 麦克风 =================
         Console.WriteLine();

@@ -217,6 +217,11 @@ public static class Program
             SysProbeDiag.Run();
             return;
         }
+        if (args.Length > 0 && args[0] == "wifiui")
+        {
+            WifiUiDiag.Run();
+            return;
+        }
         if (args.Length > 0 && args[0] == "sysrender")
         {
             SystemRenderDiag.Run(args.Length > 1 ? args[1] : "");
