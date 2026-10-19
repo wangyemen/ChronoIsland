@@ -2927,11 +2927,14 @@ public partial class IslandWindow : Window
         // 表现为"7 天的条全部重叠在顶部"（曾只看到一根条 + 一天的字）。
         var weekGrid = new Grid();
         for (int i = 0; i < week.Count; i++) weekGrid.RowDefinitions.Add(new RowDefinition());
-        double scaleS = IslandMetrics.Scale <= 0 ? 1.0 : IslandMetrics.Scale;
-        double cardBarMax = Math.Max(60, IslandMetrics.CardWidth * scaleS - 32 - 30 - 62 - 6);
+        // 【条形按比例填充，不再传宽度】BuildWeekRow 内部用 GridLength(x, Star) 分配，
+        // 容器多宽都自适应 —— 不需要（也不应该）在这里算一个像素宽度传进去。
+        // 曾经这里算 cardBarMax 传入，但算出来的值和真实列宽永远对不上：
+        // 卡宽被 ClusterStack.Clamp 到 MaxWidth（不是 CardWidth）、再叠加 LayoutTransform
+        // 的缩放口径，条形溢出被裁 →「树状图展示不全」。
         for (int i = 0; i < week.Count; i++)
         {
-            var row = BuildWeekRow(week[i], maxTotal, t, cardBarMax);
+            var row = BuildWeekRow(week[i], maxTotal, t);
             Grid.SetRow(row, i);
             weekGrid.Children.Add(row);
         }
@@ -2970,11 +2973,10 @@ public partial class IslandWindow : Window
 
     /// <summary>
     /// 周视图中的一天：周几 + 堆叠条（按应用） + 合计时长。
-    /// barMax 传入该容器的条形可用宽度：灵动岛卡传 CardWidth 口径，
-    /// 设置页传更宽的值 —— 否则设置页里条形会短得看不出比例。
+    /// 【不需要传容器宽度】条形按比例填充本列，容器多宽都自适应
+    /// （灵动岛卡 / 设置页共用此方法，两边列宽差很多）。
     /// </summary>
-    public static FrameworkElement BuildWeekRow(Sources.UsageDay d, double maxTotal, ThemeTokens t,
-        double barMax)
+    public static FrameworkElement BuildWeekRow(Sources.UsageDay d, double maxTotal, ThemeTokens t)
     {
         var row = new Grid { Height = 22, Margin = new Thickness(0, 1.5, 0, 1.5) };
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(30) });   // 周几
@@ -2993,47 +2995,74 @@ public partial class IslandWindow : Window
             VerticalAlignment = VerticalAlignment.Center
         });
 
-        // 条形容器：固定行高 + ClipToBounds ——
-        // 即使某天数据异常导致色块算得过宽，也只会裁在本列内，
-        // 绝不溢出压到右侧「合计」或左侧「周次」。
+        // 条形容器：固定行高。ClipToBounds 仅作兜底（比例布局本就不会溢出）。
         var barHost = new Grid { Height = 18, VerticalAlignment = VerticalAlignment.Center };
         barHost.ClipToBounds = true;
         if (d.Total > TimeSpan.Zero)
         {
-            double scale = d.Total.TotalMinutes / maxTotal;   // 当天条宽占比
+            double scale = d.Total.TotalMinutes / maxTotal;   // 当天条宽占本列的比例（0..1）
             var top = d.Apps.OrderByDescending(kv => kv.Value).Take(3).ToList();
             TimeSpan restTotal = d.Total - top.Aggregate(TimeSpan.Zero, (a, kv) => a + kv.Value);
             var brushes = new Brush[] { t.Accent, t.Success, t.Warning,
                                        new SolidColorBrush(Color.FromArgb(120, 140, 140, 152)) };
-            // 【条形最大宽度由调用方传入】之前写死 300，但 Star 列实际窄得多，
-            // 超出部分不会裁掉，而是把右侧「合计」压到周次上（糊成一团）。
-            double totalW = Math.Max(60, barMax) * scale;
-            // 横向 StackPanel：各应用色块首尾相接，拼成一根按应用分段的条
-            var stack = new StackPanel { Orientation = Orientation.Horizontal, Height = 18 };
+
+            // 【全比例布局，不写死像素】两层 GridLength(x, Star)：
+            //   外层 track = [条形][留白]，比例 scale : (1-scale) → 条形占本列多少由 scale 决定
+            //   内层 segGrid = 各应用按占比分列                    → 条内分段比例由数据决定
+            // WPF 在布局时按【列的真实像素宽】分配，因此容器多宽、缩放多少、
+            // 卡片被 Clamp 到多窄，条形都精确填满应有的比例，绝不会溢出被裁。
+            //
+            // 之前是先算 totalW = barMax × scale 再给每段写死 Width(px)，barMax 由调用方传：
+            // 只要传的值和真实列宽对不上（卡宽被 ClusterStack.Clamp 到 MaxWidth 而非 CardWidth、
+            // 设置页 ActualWidth 含滚动条与页面边距……），条就溢出被 ClipToBounds 裁掉，
+            // 表现为「树状图展示不全」——末尾的应用分段整个消失。
+            var segs = new List<(double Share, Brush Bg, string Tip)>();
             int i = 0;
             foreach (var kv in top)
             {
-                double w = totalW * (kv.Value.TotalMinutes / Math.Max(0.001, d.Total.TotalMinutes));
-                var seg = new Border
-                {
-                    Width = Math.Max(2, w), Height = 18, Background = brushes[i % brushes.Length],
-                    CornerRadius = i == 0 ? new CornerRadius(3) : new CornerRadius(0)
-                };
-                seg.ToolTip = $"{kv.Key} · {FmtH(kv.Value)}";
-                stack.Children.Add(seg);
+                double share = kv.Value.TotalMinutes / Math.Max(0.001, d.Total.TotalMinutes);
+                segs.Add((share, brushes[i % brushes.Length], $"{kv.Key} · {FmtH(kv.Value)}"));
                 i++;
             }
             if (restTotal > TimeSpan.Zero)
             {
-                double w = totalW * (restTotal.TotalMinutes / Math.Max(0.001, d.Total.TotalMinutes));
+                double share = restTotal.TotalMinutes / Math.Max(0.001, d.Total.TotalMinutes);
+                segs.Add((share, brushes[3], $"其他 {top.Count} 个应用 · {FmtH(restTotal)}"));
+            }
+
+            var track = new Grid();
+            track.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(scale, GridUnitType.Star) });
+            track.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(Math.Max(0, 1 - scale), GridUnitType.Star) });
+
+            var segGrid = new Grid();
+            foreach (var sg in segs)
+                segGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(sg.Share, GridUnitType.Star) });
+
+            // 【圆角按"首段只圆左、末段只圆右"分配】
+            // 之前写的是 i==0 四角全圆、其余全方，两个毛病：
+            //   · 首段右角也圆了，但它的右边还接着别的段 → 交界处圆角接方角，有道小缺口；
+            //   · 末段（没有"其他"灰段时就是最后一个应用）四角全方 → 条形末端该圆却是方的。
+            // 只有单段时首=末，四角全圆（正好是一颗胶囊）。
+            for (int s = 0; s < segs.Count; s++)
+            {
+                bool first = s == 0, last = s == segs.Count - 1;
                 var seg = new Border
                 {
-                    Width = Math.Max(2, w), Height = 18, Background = brushes[3],
-                    CornerRadius = new CornerRadius(0, 3, 3, 0), ToolTip = $"其他 {top.Count} 个应用 · {FmtH(restTotal)}"
+                    Height = 18, Background = segs[s].Bg,
+                    // CornerRadius(topLeft, topRight, bottomRight, bottomLeft)
+                    CornerRadius = new CornerRadius(
+                        first ? 3 : 0,     // 左上
+                        last ? 3 : 0,      // 右上
+                        last ? 3 : 0,      // 右下
+                        first ? 3 : 0)     // 左下
                 };
-                stack.Children.Add(seg);
+                seg.ToolTip = segs[s].Tip;
+                Grid.SetColumn(seg, s);
+                segGrid.Children.Add(seg);
             }
-            barHost.Children.Add(stack);
+            Grid.SetColumn(segGrid, 0);
+            track.Children.Add(segGrid);
+            barHost.Children.Add(track);
         }
         else
         {

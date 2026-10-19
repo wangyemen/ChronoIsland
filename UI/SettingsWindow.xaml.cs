@@ -925,11 +925,10 @@ public partial class SettingsWindow : Window
             if (maxMin <= 0) maxMin = 1;
             var wg = new Grid();
             for (int i = 0; i < week.Count; i++) wg.RowDefinitions.Add(new RowDefinition());
-            // 设置页比灵动岛卡宽得多，条形可用宽度给足
-            double pageBarMax = Math.Max(120, Math.Max(1, ActualWidth) - 150);
+            // 条形按比例填充本列（BuildWeekRow 内部用 Star 分配），不需要传宽度
             for (int i = 0; i < week.Count; i++)
             {
-                var r2 = IslandWindow.BuildWeekRow(week[i], maxMin, AppTheme.Current, pageBarMax);
+                var r2 = IslandWindow.BuildWeekRow(week[i], maxMin, AppTheme.Current);
                 Grid.SetRow(r2, i);
                 wg.Children.Add(r2);
             }
