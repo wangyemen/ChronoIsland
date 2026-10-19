@@ -194,12 +194,32 @@ public partial class SettingsWindow : Window
             }
     }
 
+    /// <summary>
+    /// 一行滑块设置。
+    ///
+    /// 【步进必须显式给，不能靠区间反推】
+    /// 旧实现用 <c>max - min &lt;= 1.5</c> 推断"小范围就用 0.05 小数步进"。
+    /// 「整体缩放」的区间是 0.5–3.0（跨度 2.5）→ 被判成整数档，
+    /// 于是 TickFrequency=1 且 IsSnapToTickEnabled=true：滑条只能落在 1×/2×/3×，
+    /// 1.5× / 1.85× 根本滑不到（用户报告的"只有三档"）。
+    /// 更糟的是显示格式也走同一条判定，<c>"{1.5:0}"</c> 会显示成 "2 ×" ——
+    /// 连默认值 1.5 都被显示成 2，看起来像"值被写死了"。
+    ///
+    /// 现在步进由 <paramref name="step"/> 显式决定（0 = 沿用旧的自适应兜底，
+    /// 仅对其它既有行生效），显示精度同样由步进决定，两者不再与区间耦合。
+    /// </summary>
     private StackPanel SliderRow(string label, double val, double min, double max,
-        string unit, Action<double> changed)
+        string unit, Action<double> changed, double step = 0)
     {
+        // 兜底：老调用点没给步进时，沿用"小范围用小数"的经验规则。
+        if (step <= 0) step = (max - min) <= 1.5 ? 0.05 : 1;
+
+        // 显示精度跟着步进走：0.05 → 两位小数（1.85），1 → 整数。
+        string fmt = step >= 1.0 ? "0" : (step >= 0.1 ? "0.0" : "0.00");
+
         var valText = new TextBlock
         {
-            Text = (max - min <= 1.5) ? $"{val:0.00} {unit}" : $"{val:0} {unit}", FontSize = 11,
+            Text = val.ToString(fmt) + " " + unit, FontSize = 11,
             Foreground = AppTheme.Current.TextTertiary, Margin = new Thickness(0, 3, 0, 0)
         };
         var left = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
@@ -207,23 +227,22 @@ public partial class SettingsWindow : Window
         { Text = label, FontSize = 12.5, Foreground = AppTheme.Current.TextPrimary });
         left.Children.Add(valText);
 
-        bool fractional = max - min <= 1.5;          // 缩放这类小范围用小数步进
         var sl = new Slider
         {
             Minimum = min, Maximum = max, Value = val, Width = 150,
             IsSnapToTickEnabled = true,
-            TickFrequency = fractional ? 0.05 : 1,
+            TickFrequency = step,
             VerticalAlignment = VerticalAlignment.Center
         };
         sl.ValueChanged += (_, e) =>
         {
-            valText.Text = fractional ? $"{e.NewValue:0.00} {unit}" : $"{e.NewValue:0} {unit}";
+            valText.Text = e.NewValue.ToString(fmt) + " " + unit;
             if (_loading) return;
             changed(e.NewValue);
             // 立即落盘：不依赖防抖定时器，避免窗口关闭时丢改动
             _settings.Save();
             PushToIsland();
-            App.LogInfo("Settings", $"{label} = {e.NewValue}");
+            App.LogInfo("Settings", $"{label} = {e.NewValue.ToString(fmt)}");
         };
 
         var grid = new Grid();
@@ -1276,11 +1295,13 @@ public partial class SettingsWindow : Window
                 _settings.Island.MaxWidth = v;
                 LivePreviewGeometry();
             }),
+            // 缩放：0.5×–3× 连续可调（步进 0.05 → 1.5× / 1.85× / 2.35× 都能落到）。
+            // 默认 1.5×（见 IslandSettings.Scale 的默认值）。
             SliderRow("整体缩放", _settings.Island.Scale, 0.5, 3.0, "×", v =>
             {
                 _settings.Island.Scale = Math.Round(v, 2);
                 LivePreviewGeometry();
-            })));
+            }, step: 0.05)));
         var hint = new TextBlock
         {
             Text = "提示：调整后会自动在屏幕顶部显示一条示例岛，方便对照效果。",

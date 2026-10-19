@@ -1250,6 +1250,49 @@ public partial class IslandWindow : Window
 
 
 
+    /// <summary>
+    /// 把「整体缩放」施加到胶囊 / 球体的内容上，使内容与外框处于同一坐标系。
+    ///
+    /// 【为什么必须做】外框宽度是 <c>逻辑宽 × Scale</c>（见 Render），
+    /// 而胶囊/球体内容是按【未缩放】口径排版的（列宽 280、图标 18、内边距 12 …）。
+    /// 不给内容加缩放，内容就只占外框的 1/Scale：
+    ///   · 1.5× 下内容占 67%，右端留下 33% 空白；
+    ///   · 波形在定宽第 3 列里，于是停在"未缩放宽"的右缘 —— 表现为
+    ///     "波形紧挨文字、不在最右端"（用户图二）；
+    ///   · 球体 36→54 放大而 18px 图标原样居中 —— "图标不自适应"（用户图三）。
+    /// 详情卡早就是这么做的（<see cref="WrapWithClose"/> 的 LayoutTransform），
+    /// 这里让胶囊 / 球体与它口径一致。
+    ///
+    /// 【为什么挂在 ContentPresenter 上】它是 Border 唯一的子元素，
+    /// 且三种形态共用一个 ContentPresenter：把变换挂在它身上，
+    /// 换装（胶囊⇄球体⇄卡片）时随内容一起生效，无需关心装的是哪种形态。
+    /// 卡片自己已经在 body 上带了 LayoutTransform，这里必须跳过，否则会二次缩放。
+    /// </summary>
+    private static void ApplyContentScale(Border b, bool wantCard)
+    {
+        if (b.Child is not ContentPresenter cp) return;
+
+        double sc = IslandMetrics.Scale <= 0 ? 1.0 : IslandMetrics.Scale;
+
+        if (wantCard || Math.Abs(sc - 1.0) < 1e-6)
+        {
+            // 卡片：内容自带缩放（WrapWithClose），这里必须清掉，避免二次缩放。
+            // Scale == 1：无需变换，清掉可让 WPF 走更省的布局路径。
+            if (cp.LayoutTransform is ScaleTransform) cp.LayoutTransform = null;
+            return;
+        }
+
+        if (cp.LayoutTransform is ScaleTransform st)
+        {
+            // 复用已有实例：避免每帧新建对象（缩放滑块拖动时每帧都会走到这里）
+            if (Math.Abs(st.ScaleX - sc) > 1e-6) { st.ScaleX = sc; st.ScaleY = sc; }
+        }
+        else
+        {
+            cp.LayoutTransform = new ScaleTransform(sc, sc);
+        }
+    }
+
     private FrameworkElement WrapWithClose(FrameworkElement body, ScaleTransform? contentScale = null)
     {
         // 【自适应高度 + 上限 + 滚动条】
@@ -2072,11 +2115,18 @@ public partial class IslandWindow : Window
     /// <summary>
     /// 球体内容：36px 正圆内仅居中显示 18px 应用图标（docs §2.4）。
     /// 关键：外层容器必须是固定尺寸且不参与拉伸（Border.Child 默认拉伸会导致图标溢出）。
+    ///
+    /// 【尺寸按比例算，不写死】
+    /// 球体与图标的比值固定为 <c>SphereSize : 18</c>（即 0.5），
+    /// 因此图标尺寸 = <c>SphereSize × (18/36) = SphereSize/2</code>。
+    /// 之前把 18 写死：整体缩放 1.5× 时球体外框被放大到 54，
+    /// 而图标仍是 18 —— 球越大、图标越小气，即用户报告的"图标大小没自适应"。
+    /// 这里改为由球体尺寸推导，将来改 SphereSize 或加缩放都会自动跟随。
+    /// （外框的放大由 Render 的 LayoutTransform 统一施加，这里只保证逻辑比例正确。）
     /// </summary>
     private static FrameworkElement BuildSphere(IslandEvent ev)
     {
-        double size = IslandMetrics.SphereSize;      // 36
-        double iconSize = 18;
+        double iconSize = SphereIconSize;            // 由球体尺寸推导，不再是字面量 18
 
         // 外层用 Stretch 填满球体容器，内部元素各自居中
         var wrap = new Grid
@@ -2087,16 +2137,18 @@ public partial class IslandWindow : Window
         };
 
         // 系统状态球体：显示 Lucide 键帽 / 状态图标，而非应用图标（docs §5.5 / §5.6）
+        // 这些分支的图标尺寸同样走比例，避免与上面的应用图标分支口径不一致。
+        double glyphSize = SphereGlyphSize;
         if (ev.Kind == "sys" && ev.Payload is Sources.SysSnapshot ss)
-            return Native.SvgIcons.CreateSphere(SignalIcon(ss.Signal), 19,
+            return Native.SvgIcons.CreateSphere(SignalIcon(ss.Signal), glyphSize,
                 ss.On ? AppTheme.Current.Accent : AppTheme.Current.TextSecondary);
 
         if (ev.Kind == "camera" && ev.Payload is Sources.CameraSnapshot cs)
-            return Native.SvgIcons.CreateSphere(cs.Busy ? "camera" : "camera-off", 19,
+            return Native.SvgIcons.CreateSphere(cs.Busy ? "camera" : "camera-off", glyphSize,
                 cs.Busy ? AppTheme.Current.Success : AppTheme.Current.TextSecondary);
 
         if (ev.Kind == "unlock")
-            return Native.SvgIcons.CreateSphere("unlock", 19, AppTheme.Current.Success);
+            return Native.SvgIcons.CreateSphere("unlock", glyphSize, AppTheme.Current.Success);
 
         // 系统状态类（电源 / 网络 / 麦克风 / 外观）：Lucide 状态图标
         var systemSphere = BuildSystemSphere(ev);
@@ -2104,10 +2156,10 @@ public partial class IslandWindow : Window
 
         // DSH 工作状态：球体内用 sparkles / check，不依赖应用图标
         if (ev.Kind == "dsh" && ev.Payload is Sources.DshSnapshot ds)
-            return Native.SvgIcons.CreateSphere(ds.Working ? "sparkles" : "check", 19,
+            return Native.SvgIcons.CreateSphere(ds.Working ? "sparkles" : "check", glyphSize,
                 ds.Working ? AppTheme.Current.Accent : AppTheme.Current.Success);
         if (ev.Kind == "dsh-retract")
-            return Native.SvgIcons.CreateSphere("sparkles", 19, AppTheme.Current.TextSecondary);
+            return Native.SvgIcons.CreateSphere("sparkles", glyphSize, AppTheme.Current.TextSecondary);
 
         var icon = Native.AppIconExtractor.GetIcon(ev.AppKey ?? ev.SourceKey);
         if (icon != null)
@@ -2121,10 +2173,11 @@ public partial class IslandWindow : Window
                 VerticalAlignment = VerticalAlignment.Center
             };
             // 用 Border 做圆角裁剪（Image 的 Clip 在某些情况下不生效）
+            // 圆角同样按比例（18px 图标用 5 → 半径 ≈ 图标 × 5/18）
             var clip = new Border
             {
                 Width = iconSize, Height = iconSize,
-                CornerRadius = new CornerRadius(5),
+                CornerRadius = new CornerRadius(iconSize * 5.0 / 18.0),
                 Background = Brushes.Transparent,
                 HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Center,
@@ -2138,7 +2191,7 @@ public partial class IslandWindow : Window
             wrap.Children.Add(new Border
             {
                 Width = iconSize, Height = iconSize,
-                CornerRadius = new CornerRadius(5),
+                CornerRadius = new CornerRadius(iconSize * 5.0 / 18.0),
                 Background = AppTheme.Current.AccentGradient,
                 HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Center
@@ -2484,6 +2537,25 @@ public partial class IslandWindow : Window
 
     internal IReadOnlyList<IslandItem> ProbeItems => _stack.Items;
     internal IslandItem? ProbeActive => _stack.Active;
+
+    /// <summary>仅自检用：强制走一帧真实渲染（弹簧收敛 + 内容换装 + 波形刷新）</summary>
+    internal void ForceRenderForProbe()
+    {
+        Render();
+        UpdateLayout();
+    }
+
+    /// <summary>
+    /// 仅自检用：窗口未 Show 时 WPF 不会自动跑布局，ActualWidth 恒为 0。
+    /// 这里手动 Measure/Arrange 一次，让自检能量到真实几何。
+    /// </summary>
+    internal void LayOutForProbe()
+    {
+        Root.Measure(new Size(ActualWidth > 0 ? ActualWidth : Width,
+                              ActualHeight > 0 ? ActualHeight : Height));
+        Root.Arrange(new Rect(0, 0, Root.DesiredSize.Width, Root.DesiredSize.Height));
+        Root.UpdateLayout();
+    }
     internal List<Border>? ProbeWaveBars(string id)
         => _mediaSig.TryGetValue(id, out var mi) ? mi.Bars : null;
     internal Grid? ProbeLyricRow(string id)
@@ -3969,6 +4041,23 @@ public partial class IslandWindow : Window
     private const double PillTailPad = 8;               // 右侧留白
 
     /// <summary>
+    /// 球体内应用图标的逻辑尺寸 = 球体尺寸的一半（docs §2.4：18 / 36）。
+    ///
+    /// 【为什么由球体尺寸推导，而不是写死 18】
+    /// 写死会让"改球体尺寸"和"整体缩放"两条路径各自漂移：
+    /// 缩放 1.5× 时球体外框放大到 54，而图标仍是 18，比例从 0.5 掉到 0.33。
+    /// 由 <see cref="IslandMetrics.SphereSize"/> 推导后，任何改动都自动等比。
+    /// </summary>
+    private static double SphereIconSize => IslandMetrics.SphereSize / 2.0;
+
+    /// <summary>
+    /// 球体内 Lucide 状态字形的逻辑尺寸。
+    /// 原为字面量 19（略大于应用图标的 18，因为线性图标视觉重量偏轻）。
+    /// 同样改为按球体尺寸推导，保持"字形略大于图标"的既有观感。
+    /// </summary>
+    private static double SphereGlyphSize => Math.Round(IslandMetrics.SphereSize * 19.0 / 36.0, 2);
+
+    /// <summary>
     /// 文本列必须额外预留的"省略号余量"（未缩放 DIP）。
     ///
     /// WPF 的 TextBlock 在判断"是否要加省略号"时，会把末尾 "…" 字形的宽度
@@ -4010,7 +4099,14 @@ public partial class IslandWindow : Window
         // 【下限 96 而不是 60】60 太窄：波形列(28) + 左侧间距(6) 会贴着文字，
         // 歌词短到 "So come on" 时胶囊整体收缩，波形就被挤到文字上。
         // 96 能保证「标题/歌词 + 波形」之间始终有呼吸空间。
-        return Math.Clamp(Math.Max(metaW, lyricW) + 18, 96, maxText);
+        //
+        // 【下限必须夹到 maxText】大缩放下 cap 变小，而 96 是未缩放常量：
+        // 3× 时 cap≈140 → maxText≈86 < 96 → Math.Clamp 的 min>max 直接抛
+        // ArgumentException（"'96' cannot be greater than '88'"）。
+        // 滑条能拖到 3×，所以这是必然触发的崩溃，不只是边界情形。
+        // 下限取 min(96, maxText)，并保证不为负。
+        double minText = Math.Min(96.0, Math.Max(0, maxText));
+        return Math.Clamp(Math.Max(metaW, lyricW) + 18, minText, Math.Max(minText, maxText));
     }
 
     /// <summary>
@@ -4026,10 +4122,15 @@ public partial class IslandWindow : Window
         // 下限不能用 MinWidth(36)：那是"正圆收起"的几何值，
         // 套在三列媒体胶囊上会让容器比三列之和还窄。
         double mediaMin = PillCoverColW + PillWaveColW + PillTailPad + 96;
+        // 上限 = min(设置上限, 缩放后换算到未缩放坐标的上限)。
+        // 【大缩放会翻转 min/max】3× 时 cap≈140 < mediaMin(166) → Math.Clamp 抛异常。
+        // 把下限夹到上限之内，保证 min <= max 恒成立。
+        double hi = Math.Min(cap, IslandMetrics.MaxWidth);
+        double lo = Math.Min(mediaMin, hi);
 
         double total = Math.Clamp(
             PillCoverColW + PillWaveColW + PillTailPad + MediaPillTextWidth(snap, lyricW),
-            mediaMin, Math.Min(cap, IslandMetrics.MaxWidth));
+            lo, hi);
 
         // 【关键：由最终总宽反推文字列宽】
         // 以前容器宽和 columns[1] 是各自独立算出来的，两端还会在不同时刻调用
@@ -4317,6 +4418,17 @@ public partial class IslandWindow : Window
                 if (!wantCard) _cardParts = null;
                 _lastLayoutSignature = null;   // 强制下一帧重算槽位
             }
+
+            // 【内容必须与"已缩放外框"同一坐标系】
+            // 胶囊/球体内容按【未缩放】口径排版（列宽、内边距、图标尺寸都是逻辑值），
+            // 而外框已被放大成 w = 逻辑宽 × Scale。若内容不带缩放直接塞进去：
+            //   · 内容只占外框的 1/Scale（1.5× 下约 67%）→ 右侧凭空多出一大片空白；
+            //   · 波形所在的是定宽第 3 列，它因此**不在胶囊最右端**，
+            //     而是停在"未缩放宽"的右缘 —— 用户看到的就是"波形紧挨文字/缩在左边"。
+            //   · 球体同理：36px 球体里的 18px 图标不会随外框放大而变大。
+            // 详情卡早已用 LayoutTransform 解决了同一问题（见 WrapWithClose），
+            // 胶囊与球体此前漏掉了这一步 —— 这里统一补上，三种形态口径一致。
+            ApplyContentScale(b, wantCard);
 
             if (b.Child is ContentPresenter cp2)
             {

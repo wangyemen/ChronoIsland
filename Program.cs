@@ -188,6 +188,16 @@ public static class Program
             PillWidthDiag.Run();
             return;
         }
+        if (args.Length > 0 && args[0] == "scalelive")
+        {
+            ScaleLiveDiag.Run();
+            return;
+        }
+        if (args.Length > 0 && args[0] == "scalegeom")
+        {
+            ScaleGeomDiag.Run();
+            return;
+        }
         if (args.Length > 0 && args[0] == "mediaiso")
         {
             MediaIsolationDiag.Run();
